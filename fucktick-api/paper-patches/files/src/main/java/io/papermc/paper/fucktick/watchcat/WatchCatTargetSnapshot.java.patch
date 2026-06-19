@@ -1,0 +1,27 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatTargetSnapshot.java
+@@ -1,0 +_,24 @@
++package io.papermc.paper.fucktick.watchcat;
++
++import java.util.Map;
++
++public record WatchCatTargetSnapshot(
++    String id,
++    String displayName,
++    WatchCatTargetKind kind,
++    String threadName,
++    long threadId,
++    boolean alive,
++    String state,
++    Map<String, String> details
++) {
++
++    public WatchCatTargetSnapshot {
++        id = id == null ? "" : id;
++        displayName = displayName == null ? id : displayName;
++        kind = kind == null ? WatchCatTargetKind.OTHER : kind;
++        threadName = threadName == null ? "" : threadName;
++        state = state == null ? "" : state;
++        details = details == null ? Map.of() : Map.copyOf(details);
++    }
++}

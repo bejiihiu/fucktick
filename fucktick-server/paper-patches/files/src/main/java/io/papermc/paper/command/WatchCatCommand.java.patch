@@ -1,0 +1,491 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/command/WatchCatCommand.java
+@@ -1,0 +_,488 @@
++package io.papermc.paper.command;
++
++import io.papermc.paper.fucktick.compute.ComputeBrokerSnapshot;
++import io.papermc.paper.fucktick.compute.ComputeApplyDecision;
++import io.papermc.paper.fucktick.compute.ComputeCancellationToken;
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputePriority;
++import io.papermc.paper.fucktick.compute.ComputeTaskHandle;
++import io.papermc.paper.fucktick.compute.ComputeTaskOwner;
++import io.papermc.paper.fucktick.compute.ComputeTaskSnapshot;
++import io.papermc.paper.fucktick.compute.ComputeTaskState;
++import io.papermc.paper.fucktick.compute.ComputeTaskType;
++import io.papermc.paper.fucktick.compute.ComputeTaskTypeSnapshot;
++import io.papermc.paper.fucktick.compute.ComputeWorkerSnapshot;
++import io.papermc.paper.fucktick.compute.FuckTickComputeBroker;
++import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingResult;
++import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingSnapshot;
++import io.papermc.paper.fucktick.compute.workload.FuckTickComputeWorkloads;
++import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupResult;
++import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupSnapshot;
++import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
++import io.papermc.paper.fucktick.plugin.PluginRuntimeSnapshot;
++import io.papermc.paper.fucktick.watchcat.WatchCat;
++import io.papermc.paper.fucktick.watchcat.WatchCatIncident;
++import io.papermc.paper.fucktick.watchcat.WatchCatPingResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatSettings;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetSnapshot;
++import java.io.PrintWriter;
++import java.io.StringWriter;
++import java.text.DecimalFormat;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.TimeUnit;
++import org.bukkit.Bukkit;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.permissions.Permission;
++import org.bukkit.permissions.PermissionDefault;
++import org.jetbrains.annotations.NotNull;
++
++public final class WatchCatCommand extends Command {
++
++    private static final ThreadLocal<DecimalFormat> ONE_DECIMAL = ThreadLocal.withInitial(() -> new DecimalFormat("#,##0.0"));
++
++    public WatchCatCommand(final String name) {
++        super(name);
++        this.description = "WatchCat diagnostics";
++        this.usageMessage = "/watchcat status|targets|incidents|threads|target <id> dump|ping|recover|plugin <name> dump|queue|routing|compute status|workers|queue|tasks|task <id>";
++        this.setAliases(List.of("meow"));
++        this.setPermission("bukkit.command.watchcat");
++        if (Bukkit.getServer() != null && Bukkit.getPluginManager().getPermission("bukkit.command.watchcat") == null) {
++            Bukkit.getPluginManager().addPermission(new Permission("bukkit.command.watchcat", PermissionDefault.OP));
++        }
++    }
++
++    @Override
++    public boolean execute(final @NotNull CommandSender sender, final @NotNull String commandLabel, final @NotNull String[] args) {
++        if (!this.testPermission(sender)) {
++            return true;
++        }
++        // FuckTick Start - единая диагностика WatchCat
++        if (args.length == 0 || args[0].equalsIgnoreCase("status")) {
++            this.sendWatchCatStatus(sender);
++            return true;
++        }
++        if (args.length >= 1 && args[0].equalsIgnoreCase("targets")) {
++            this.sendWatchCatTargets(sender);
++            return true;
++        }
++        if (args.length >= 1 && args[0].equalsIgnoreCase("incidents")) {
++            this.sendWatchCatIncidents(sender);
++            return true;
++        }
++        if (args.length >= 1 && args[0].equalsIgnoreCase("threads")) {
++            this.sendWatchCatThreads(sender);
++            return true;
++        }
++        if (args.length >= 3 && args[0].equalsIgnoreCase("target")) {
++            this.sendWatchCatTarget(sender, args);
++            return true;
++        }
++        // FuckTick End
++        // FuckTick Start - диагностика compute broker
++        if (args.length >= 2 && args[0].equalsIgnoreCase("compute")) {
++            this.sendCompute(sender, args);
++            return true;
++        }
++        // FuckTick End
++        if (args.length >= 2 && args[0].equalsIgnoreCase("plugins") && args[1].equalsIgnoreCase("threads")) {
++            this.sendThreads(sender);
++            return true;
++        }
++        if (args.length >= 3 && args[0].equalsIgnoreCase("plugin")) {
++            final PluginRuntimeSnapshot snapshot = PluginFUCKLOADER.instance().snapshot(args[1]);
++            if (snapshot == null) {
++                sender.sendMessage("Unknown plugin runtime: " + args[1]);
++                return true;
++            }
++            switch (args[2].toLowerCase(java.util.Locale.ROOT)) {
++                case "dump" -> this.sendDump(sender, snapshot);
++                case "queue" -> this.sendQueue(sender, snapshot);
++                case "routing" -> this.sendRouting(sender, snapshot);
++                default -> sender.sendMessage("Usage: " + this.usageMessage);
++            }
++            return true;
++        }
++        sender.sendMessage("Usage: " + this.usageMessage);
++        return true;
++    }
++
++    @Override
++    public @NotNull List<String> tabComplete(final @NotNull CommandSender sender, final @NotNull String alias, final @NotNull String[] args) throws IllegalArgumentException {
++        if (args.length == 1) {
++            return matchingLast(args, List.of("status", "targets", "incidents", "threads", "target", "plugin", "compute"));
++        }
++        if (args.length == 2 && args[0].equalsIgnoreCase("target")) {
++            return matchingLast(args, WatchCat.instance().targetSnapshots().stream().map(WatchCatTargetSnapshot::id).toList());
++        }
++        if (args.length == 3 && args[0].equalsIgnoreCase("target")) {
++            return matchingLast(args, List.of("dump", "ping", "recover"));
++        }
++        if (args.length == 2 && args[0].equalsIgnoreCase("plugin")) {
++            return matchingLast(args, PluginFUCKLOADER.instance().snapshots().stream().map(PluginRuntimeSnapshot::pluginName).toList());
++        }
++        if (args.length == 3 && args[0].equalsIgnoreCase("plugin")) {
++            return matchingLast(args, List.of("dump", "queue", "routing"));
++        }
++        // FuckTick Start - tab-complete диагностики compute broker
++        if (args.length == 2 && args[0].equalsIgnoreCase("compute")) {
++            return matchingLast(args, List.of("status", "workers", "queue", "tasks", "task"));
++        }
++        if (args.length == 3 && args[0].equalsIgnoreCase("compute") && args[1].equalsIgnoreCase("task")) {
++            return matchingLast(args, FuckTickComputeBroker.instance().snapshot().tasks().stream().map(task -> Long.toString(task.id())).toList());
++        }
++        // FuckTick End
++        return List.of();
++    }
++
++    private static List<String> matchingLast(final String[] args, final List<String> values) {
++        final String token = args.length == 0 ? "" : args[args.length - 1].toLowerCase(java.util.Locale.ROOT);
++        return values.stream().filter(value -> value.toLowerCase(java.util.Locale.ROOT).startsWith(token)).toList();
++    }
++
++    // FuckTick Start - вывод состояния WatchCat
++    private void sendWatchCatStatus(final CommandSender sender) {
++        final List<WatchCatTargetSnapshot> targets = WatchCat.instance().targetSnapshots();
++        final long alive = targets.stream().filter(WatchCatTargetSnapshot::alive).count();
++        this.sendDiagnostic(sender, "WatchCat", Map.of(
++            "running", Boolean.toString(WatchCat.instance().isRunning()),
++            "targets", Integer.toString(targets.size()),
++            "alive", Long.toString(alive),
++            "incidents", Integer.toString(WatchCat.instance().incidents().size()),
++            "heartbeatTimeout", WatchCatSettings.heartbeatTimeoutMs() + "ms"
++        ), targets.stream()
++            .limit(10L)
++            .map(target -> target.id() + " kind=" + target.kind() + " state=" + target.state() + " alive=" + target.alive())
++            .toList());
++    }
++
++    private void sendWatchCatTargets(final CommandSender sender) {
++        final List<WatchCatTargetSnapshot> targets = WatchCat.instance().targetSnapshots();
++        if (targets.isEmpty()) {
++            sender.sendMessage("No WatchCat targets registered.");
++            return;
++        }
++        this.sendDiagnostic(sender, "WatchCat targets", Map.of("targets", Integer.toString(targets.size())), targets.stream()
++            .map(target -> target.id()
++                + " kind=" + target.kind()
++                + " state=" + target.state()
++                + " alive=" + target.alive()
++                + " thread=\"" + target.threadName() + "\""
++                + " tid=" + target.threadId())
++            .toList());
++    }
++
++    private void sendWatchCatIncidents(final CommandSender sender) {
++        final List<WatchCatIncident> incidents = WatchCat.instance().incidents().stream().limit(20L).toList();
++        if (incidents.isEmpty()) {
++            sender.sendMessage("No WatchCat incidents recorded.");
++            return;
++        }
++        this.sendDiagnostic(sender, "WatchCat incidents", Map.of("shown", Integer.toString(incidents.size())), incidents.stream()
++            .map(incident -> "#" + incident.id()
++                + " target=" + incident.targetId()
++                + " kind=" + incident.kind()
++                + " at=" + incident.detectedAtMs()
++                + " action=" + incident.recoveryResult().action()
++                + " recovered=" + incident.recoveryResult().recovered()
++                + " reason=\"" + incident.reason() + "\"")
++            .toList());
++    }
++
++    private void sendWatchCatThreads(final CommandSender sender) {
++        final List<WatchCatTargetSnapshot> threads = WatchCat.instance().targetSnapshots().stream()
++            .filter(target -> target.threadId() > 0L)
++            .toList();
++        if (threads.isEmpty()) {
++            sender.sendMessage("No WatchCat thread targets registered.");
++            return;
++        }
++        this.sendDiagnostic(sender, "WatchCat threads", Map.of("threads", Integer.toString(threads.size())), threads.stream()
++            .map(target -> target.id()
++                + " thread=\"" + target.threadName() + "\""
++                + " tid=" + target.threadId()
++                + " alive=" + target.alive()
++                + " state=" + target.state())
++            .toList());
++    }
++
++    private void sendWatchCatTarget(final CommandSender sender, final String[] args) {
++        final WatchCatTargetSnapshot snapshot = WatchCat.instance().targetSnapshot(args[1]);
++        if (snapshot == null) {
++            sender.sendMessage("Unknown WatchCat target: " + args[1]);
++            return;
++        }
++        switch (args[2].toLowerCase(java.util.Locale.ROOT)) {
++            case "dump" -> this.sendWatchCatTargetDump(sender, snapshot);
++            case "ping" -> this.sendWatchCatTargetPing(sender, snapshot);
++            case "recover" -> this.sendWatchCatTargetRecover(sender, snapshot);
++            default -> sender.sendMessage("Usage: " + this.usageMessage);
++        }
++    }
++
++    private void sendWatchCatTargetDump(final CommandSender sender, final WatchCatTargetSnapshot snapshot) {
++        final Map<String, String> counters = new LinkedHashMap<>();
++        counters.put("kind", snapshot.kind().name());
++        counters.put("threadId", Long.toString(snapshot.threadId()));
++        counters.put("alive", Boolean.toString(snapshot.alive()));
++        counters.put("state", snapshot.state());
++        final List<String> sections = new ArrayList<>();
++        sections.add("Target: " + snapshot.id());
++        sections.add("Display: " + snapshot.displayName());
++        sections.add("Thread: " + blankDash(snapshot.threadName()));
++        snapshot.details().forEach((key, value) -> sections.add(key + ": " + value));
++        this.sendDiagnostic(sender, "WatchCat target", counters, sections);
++    }
++
++    private void sendWatchCatTargetPing(final CommandSender sender, final WatchCatTargetSnapshot snapshot) {
++        final WatchCatPingResult result = WatchCat.instance().ping(snapshot.id(), WatchCatSettings.heartbeatTimeoutMs());
++        this.sendDiagnostic(sender, "WatchCat ping", Map.of(
++            "target", result.targetId(),
++            "ok", Boolean.toString(result.ok()),
++            "duration", result.durationMs() + "ms"
++        ), List.of(
++            "Response: " + blankDash(result.response()),
++            "Failure: " + blankDash(result.failure())
++        ));
++    }
++
++    private void sendWatchCatTargetRecover(final CommandSender sender, final WatchCatTargetSnapshot snapshot) {
++        final WatchCatRecoveryResult result = WatchCat.instance().recover(snapshot.id(), "manual command");
++        this.sendDiagnostic(sender, "WatchCat recovery", Map.of(
++            "target", snapshot.id(),
++            "action", result.action().name(),
++            "recovered", Boolean.toString(result.recovered()),
++            "escalate", Boolean.toString(result.escalate())
++        ), List.of(result.message()));
++    }
++    // FuckTick End
++
++    private void sendThreads(final CommandSender sender) {
++        final List<PluginRuntimeSnapshot> snapshots = PluginFUCKLOADER.instance().snapshots();
++        if (snapshots.isEmpty()) {
++            sender.sendMessage("No plugin runtimes registered.");
++            return;
++        }
++        this.sendDiagnostic(sender, "Plugin threads", Map.of("plugins", Integer.toString(snapshots.size())), snapshots.stream()
++            .map(snapshot -> snapshot.pluginName() + " state=" + snapshot.state() + " thread=\"" + snapshot.threadName() + "\" tid=" + snapshot.threadId() + " queued=" + snapshot.queuedTasks())
++            .toList());
++    }
++
++    private void sendDump(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
++        final Map<String, String> counters = new LinkedHashMap<>();
++        counters.put("state", snapshot.state().name());
++        counters.put("threadId", Long.toString(snapshot.threadId()));
++        counters.put("queued", Integer.toString(snapshot.queuedTasks()));
++        counters.put("resultQueue", Integer.toString(snapshot.resultQueueSize()));
++        counters.put("lastTaskMs", Long.toString(snapshot.lastTaskDurationMs()));
++        counters.put("averageTaskMs", Long.toString(snapshot.averageTaskDurationMs()));
++        counters.put("blockedCallers", Integer.toString(snapshot.blockedCallers()));
++        final List<String> sections = new ArrayList<>();
++        sections.add("Plugin: " + snapshot.pluginName());
++        sections.add("Thread: " + snapshot.threadName());
++        sections.add("Running task: " + snapshot.runningTask());
++        sections.add("Last owner context: " + snapshot.lastOwnerContext());
++        final Throwable failure = PluginFUCKLOADER.instance().failure(snapshot.pluginName());
++        if (failure != null) {
++            final StringWriter writer = new StringWriter();
++            failure.printStackTrace(new PrintWriter(writer));
++            sections.add("Failure: " + writer);
++        }
++        this.sendDiagnostic(sender, "Plugin dump", counters, sections);
++    }
++
++    private void sendQueue(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
++        this.sendDiagnostic(sender, "Plugin queue", Map.of(
++            "lifecycleQueued", Integer.toString(snapshot.lifecycleQueuedTasks()),
++            "callbackQueued", Integer.toString(snapshot.queuedTasks()),
++            "resultQueue", Integer.toString(snapshot.resultQueueSize()),
++            "blockedCallers", Integer.toString(snapshot.blockedCallers())
++        ), List.of("Plugin: " + snapshot.pluginName()));
++    }
++
++    private void sendRouting(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
++        final RoutingMetadataWarmupSnapshot routingSnapshot = new RoutingMetadataWarmupSnapshot(
++            ComputeGeneration.of(System.nanoTime()),
++            snapshot.pluginName(),
++            List.of(snapshot.pluginName() + ".runtime"),
++            List.of("commands", "tab-complete", "asyncScheduler", "regionScheduler", "entityScheduler", "globalScheduler")
++        );
++        final ComputeTaskHandle<RoutingMetadataWarmupResult> handle = FuckTickComputeBroker.instance().submit(
++            ComputeTaskType.ROUTING_METADATA_WARMUP,
++            ComputePriority.BACKGROUND_WARMUP,
++            new ComputeTaskOwner(null, snapshot.pluginName()),
++            "routing metadata warmup for " + snapshot.pluginName(),
++            routingSnapshot,
++            FuckTickComputeWorkloads::routingMetadataWarmup,
++            Runnable::run,
++            (context, result) -> ComputeApplyDecision.APPLIED
++        );
++        final RoutingMetadataWarmupResult result = handle.awaitResultOrFallback(250L, TimeUnit.MILLISECONDS, () -> FuckTickComputeWorkloads.routingMetadataWarmup(routingSnapshot, new ComputeCancellationToken()));
++        final List<String> sections = new ArrayList<>();
++        sections.add("Plugin: " + snapshot.pluginName());
++        sections.add("Commands: plugin-thread blocking result");
++        sections.add("Tab-complete: plugin-thread blocking result");
++        sections.add("AsyncScheduler: plugin-thread");
++        sections.add("RegionScheduler: owner-thread");
++        sections.add("EntityScheduler: owner-thread");
++        sections.add("GlobalRegionScheduler: owner-thread");
++        sections.add("Unknown events: owner-only");
++        result.warnings().forEach(warning -> sections.add("Warning: " + warning));
++        this.sendDiagnostic(sender, "Plugin routing", Map.of(
++            "listenersScanned", Integer.toString(result.listenersScanned()),
++            "commandsScanned", Integer.toString(result.commandsScanned())
++        ), sections);
++    }
++
++    // FuckTick Start - вывод состояния compute broker
++    private void sendCompute(final CommandSender sender, final String[] args) {
++        final ComputeBrokerSnapshot snapshot = FuckTickComputeBroker.instance().snapshot();
++        switch (args[1].toLowerCase(java.util.Locale.ROOT)) {
++            case "status" -> this.sendComputeStatus(sender, snapshot);
++            case "workers" -> this.sendComputeWorkers(sender, snapshot);
++            case "queue" -> this.sendComputeQueue(sender, snapshot);
++            case "tasks" -> this.sendComputeTasks(sender, snapshot);
++            case "task" -> {
++                if (args.length < 3) {
++                    sender.sendMessage("Usage: /watchcat compute task <id>");
++                    return;
++                }
++                try {
++                    this.sendComputeTask(sender, Long.parseLong(args[2]));
++                } catch (final NumberFormatException ex) {
++                    sender.sendMessage("Compute task id must be a number: " + args[2]);
++                }
++            }
++            default -> sender.sendMessage("Usage: " + this.usageMessage);
++        }
++    }
++
++    private void sendComputeStatus(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        final long completed = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::completed).sum();
++        final long applied = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::applied).sum();
++        final long stale = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::stale).sum();
++        final long rejected = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::rejected).sum();
++        final List<String> sections = new ArrayList<>();
++        sections.add("Top task types:");
++        snapshot.taskTypes().stream()
++            .filter(type -> type.submitted() > 0L || type.rejected() > 0L)
++            .sorted(Comparator.comparingLong(ComputeTaskTypeSnapshot::submitted).reversed())
++            .limit(8L)
++            .forEach(type -> sections.add(type.type()
++                + " queued=" + type.queued()
++                + " running=" + type.running()
++                + " avgCompute=" + ONE_DECIMAL.get().format(type.averageComputeTimeMs()) + "ms"
++                + " stale=" + type.stale()
++                + " rejected=" + type.rejected()));
++        this.sendDiagnostic(sender, "Compute Broker", Map.of(
++            "workers", Integer.toString(snapshot.workerCount()),
++            "queued", Integer.toString(snapshot.queuedTasks()),
++            "running", Integer.toString(snapshot.runningTasks()),
++            "completed", Long.toString(completed),
++            "applied", Long.toString(applied),
++            "stale", Long.toString(stale),
++            "rejected", Long.toString(rejected),
++            "shutdown", Boolean.toString(snapshot.shutdown())
++        ), sections);
++    }
++
++    private void sendComputeWorkers(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        this.sendDiagnostic(sender, "Compute workers", Map.of("workers", Integer.toString(snapshot.workers().size())), snapshot.workers().stream()
++            .map(worker -> worker.name() + " alive=" + worker.alive() + " task=" + (worker.taskId() == null ? "-" : worker.taskId()))
++            .toList());
++    }
++
++    private void sendComputeQueue(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        final List<ComputeTaskSnapshot> queued = snapshot.tasks().stream()
++            .filter(task -> task.state() == ComputeTaskState.QUEUED || task.state() == ComputeTaskState.SNAPSHOTTED || task.state() == ComputeTaskState.SUBMITTED)
++            .sorted(Comparator.comparing(ComputeTaskSnapshot::priority).thenComparingLong(ComputeTaskSnapshot::id))
++            .limit(20L)
++            .toList();
++        if (queued.isEmpty()) {
++            sender.sendMessage("Compute queue is empty.");
++            return;
++        }
++        this.sendDiagnostic(sender, "Compute queue", Map.of("queued", Integer.toString(queued.size())), queued.stream().map(this::formatComputeTaskLine).toList());
++    }
++
++    private void sendComputeTasks(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        final List<ComputeTaskSnapshot> tasks = snapshot.tasks().stream().limit(20L).toList();
++        if (tasks.isEmpty()) {
++            sender.sendMessage("No compute tasks tracked.");
++            return;
++        }
++        this.sendDiagnostic(sender, "Compute tasks", Map.of("tracked", Integer.toString(tasks.size())), tasks.stream().map(this::formatComputeTaskLine).toList());
++    }
++
++    private void sendComputeTask(final CommandSender sender, final long taskId) {
++        final ComputeTaskSnapshot task = FuckTickComputeBroker.instance().taskSnapshot(taskId);
++        if (task == null) {
++            sender.sendMessage("Unknown compute task: " + taskId);
++            return;
++        }
++        final Map<String, String> counters = new LinkedHashMap<>();
++        counters.put("id", Long.toString(task.id()));
++        counters.put("generation", Long.toString(task.generation().value()));
++        counters.put("queueTime", millisOrDash(task.queueTimeMs()));
++        counters.put("computeTime", millisOrDash(task.computeTimeMs()));
++        counters.put("applyDelay", millisOrDash(task.applyDelayMs()));
++        final List<String> sections = new ArrayList<>();
++        sections.add("Type: " + task.type());
++        sections.add("Priority: " + task.priority());
++        sections.add("State: " + task.state());
++        sections.add("Owner: " + task.owner().displayName());
++        sections.add("Description: " + task.description());
++        sections.add("Worker thread: " + blankDash(task.workerThread()));
++        sections.add("Apply thread: " + blankDash(task.applyThread()));
++        if (task.cancelled()) {
++            sections.add("Cancellation: " + blankDash(task.cancellationReason()));
++        }
++        if (!task.failureMessage().isBlank()) {
++            sections.add("Failure: " + task.failureMessage());
++        }
++        this.sendDiagnostic(sender, "Compute task", counters, sections);
++    }
++
++    private String formatComputeTaskLine(final ComputeTaskSnapshot task) {
++        return "#" + task.id()
++            + " " + task.type()
++            + " state=" + task.state()
++            + " priority=" + task.priority()
++            + " owner=" + task.owner().displayName()
++            + " queue=" + millisOrDash(task.queueTimeMs())
++            + " compute=" + millisOrDash(task.computeTimeMs())
++            + " description=\"" + task.description() + "\"";
++    }
++
++    private static String millisOrDash(final long millis) {
++        return millis < 0L ? "-" : millis + "ms";
++    }
++
++    private static String blankDash(final String value) {
++        return value == null || value.isBlank() ? "-" : value;
++    }
++
++    private void sendDiagnostic(final CommandSender sender, final String reportName, final Map<String, String> counters, final List<String> sections) {
++        final DiagnosticFormattingSnapshot snapshot = new DiagnosticFormattingSnapshot(ComputeGeneration.of(System.nanoTime()), reportName, counters, sections);
++        final ComputeTaskHandle<DiagnosticFormattingResult> handle = FuckTickComputeBroker.instance().submit(
++            ComputeTaskType.DIAGNOSTIC_FORMAT,
++            ComputePriority.LOW_DIAGNOSTICS,
++            ComputeTaskOwner.SERVER,
++            "diagnostic format " + reportName,
++            snapshot,
++            FuckTickComputeWorkloads::diagnosticFormat,
++            Runnable::run,
++            (context, result) -> ComputeApplyDecision.APPLIED
++        );
++        final DiagnosticFormattingResult result = handle.awaitResultOrFallback(250L, TimeUnit.MILLISECONDS, () -> FuckTickComputeWorkloads.diagnosticFormat(snapshot, new ComputeCancellationToken()));
++        for (final String line : result.formattedText().split("\\R")) {
++            sender.sendMessage(line);
++        }
++    }
++    // FuckTick End
++}

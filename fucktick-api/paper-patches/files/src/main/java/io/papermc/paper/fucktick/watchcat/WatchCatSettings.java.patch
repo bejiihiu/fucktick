@@ -1,0 +1,63 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatSettings.java
+@@ -1,0 +_,60 @@
++package io.papermc.paper.fucktick.watchcat;
++
++public final class WatchCatSettings {
++
++    private WatchCatSettings() {
++    }
++
++    public static boolean enabled() {
++        return readBoolean("fucktick.watchcat.enabled", true);
++    }
++
++    public static String heartbeatPayload() {
++        return System.getProperty("fucktick.watchcat.heartbeatPayload", "Meow <3");
++    }
++
++    public static long heartbeatTimeoutMs() {
++        return readLong("fucktick.watchcat.heartbeatTimeoutMs", 10_000L);
++    }
++
++    public static long heartbeatIntervalMs() {
++        return readLong("fucktick.watchcat.heartbeatIntervalMs", 10_000L);
++    }
++
++    public static long recoveryWaitMs() {
++        return readLong("fucktick.watchcat.recoveryWaitMs", 1_000L);
++    }
++
++    public static int incidentLimit() {
++        return readInt("fucktick.watchcat.incidentLimit", 128);
++    }
++
++    private static boolean readBoolean(final String key, final boolean fallback) {
++        final String value = System.getProperty(key);
++        return value == null || value.isBlank() ? fallback : Boolean.parseBoolean(value);
++    }
++
++    private static int readInt(final String key, final int fallback) {
++        final String value = System.getProperty(key);
++        if (value == null || value.isBlank()) {
++            return fallback;
++        }
++        try {
++            return Math.max(1, Integer.parseInt(value));
++        } catch (final NumberFormatException ignored) {
++            return fallback;
++        }
++    }
++
++    private static long readLong(final String key, final long fallback) {
++        final String value = System.getProperty(key);
++        if (value == null || value.isBlank()) {
++            return fallback;
++        }
++        try {
++            return Math.max(1L, Long.parseLong(value));
++        } catch (final NumberFormatException ignored) {
++            return fallback;
++        }
++    }
++}

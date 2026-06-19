@@ -84,8 +84,8 @@ These models are deliberately boring data carriers. That is the point. Workers s
 
 The current runtime wiring is intentionally conservative:
 
-- `/fucktick` diagnostics submit `DIAGNOSTIC_FORMAT` tasks and fall back on timeout.
-- `/fucktick plugin <name> routing` submits `ROUTING_METADATA_WARMUP` tasks and falls back on timeout.
+- `/watchcat` diagnostics submit `DIAGNOSTIC_FORMAT` tasks and fall back on timeout.
+- `/watchcat plugin <name> routing` submits `ROUTING_METADATA_WARMUP` tasks and falls back on timeout.
 - successful plugin enable submits background routing metadata warmup from listener and command snapshots.
 - chunk save NBT serialization is routed through `CHUNK_SAVE_SERIALIZE` after `SerializableChunkData.copyOf(...)` has already captured owner-thread state.
 - a dedicated compute IO worker pool exists for payload-style write work that must not occupy generic CPU workers.
@@ -143,14 +143,14 @@ That message is intentionally strict. If a worker needs live state, the task sha
 
 ## Commands
 
-The `/fucktick` command now exposes compute diagnostics:
+The `/watchcat` command now exposes compute diagnostics:
 
 ```text
-/fucktick compute status
-/fucktick compute workers
-/fucktick compute queue
-/fucktick compute tasks
-/fucktick compute task <id>
+/watchcat compute status
+/watchcat compute workers
+/watchcat compute queue
+/watchcat compute tasks
+/watchcat compute task <id>
 ```
 
 These commands are for runtime inspection, not for steering live task execution by hand. They show whether the broker is healthy, overloaded, stuck, or producing stale results.

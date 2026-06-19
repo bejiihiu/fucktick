@@ -1,0 +1,19 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatPingResult.java
+@@ -1,0 +_,16 @@
++package io.papermc.paper.fucktick.watchcat;
++
++public record WatchCatPingResult(
++    String targetId,
++    boolean ok,
++    long durationMs,
++    String response,
++    String failure
++) {
++
++    public WatchCatPingResult {
++        targetId = targetId == null ? "" : targetId;
++        response = response == null ? "" : response;
++        failure = failure == null ? "" : failure;
++    }
++}

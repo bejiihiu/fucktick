@@ -1,0 +1,25 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatIncident.java
+@@ -1,0 +_,22 @@
++package io.papermc.paper.fucktick.watchcat;
++
++public record WatchCatIncident(
++    long id,
++    String targetId,
++    String displayName,
++    WatchCatTargetKind kind,
++    long detectedAtMs,
++    String reason,
++    String threadDump,
++    WatchCatRecoveryResult recoveryResult
++) {
++
++    public WatchCatIncident {
++        targetId = targetId == null ? "" : targetId;
++        displayName = displayName == null ? targetId : displayName;
++        kind = kind == null ? WatchCatTargetKind.OTHER : kind;
++        reason = reason == null ? "" : reason;
++        threadDump = threadDump == null ? "" : threadDump;
++        recoveryResult = recoveryResult == null ? WatchCatRecoveryResult.unavailable("No recovery result") : recoveryResult;
++    }
++}

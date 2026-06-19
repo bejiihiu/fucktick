@@ -1,0 +1,14 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatRecoveryAction.java
+@@ -1,0 +_,11 @@
++package io.papermc.paper.fucktick.watchcat;
++
++public enum WatchCatRecoveryAction {
++    NONE,
++    INTERRUPTED,
++    RESTARTED,
++    FAILED,
++    SHUTDOWN,
++    ESCALATE,
++    UNAVAILABLE
++}

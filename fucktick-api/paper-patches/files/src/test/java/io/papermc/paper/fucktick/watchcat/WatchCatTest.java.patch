@@ -1,0 +1,82 @@
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/fucktick/watchcat/WatchCatTest.java
+@@ -1,0 +_,79 @@
++package io.papermc.paper.fucktick.watchcat;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.TimeUnit;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++class WatchCatTest {
++
++    @BeforeEach
++    void setup() {
++        WatchCat.instance().clearForTesting();
++    }
++
++    @AfterEach
++    void cleanup() {
++        WatchCat.instance().clearForTesting();
++        System.clearProperty("fucktick.watchcat.heartbeatTimeoutMs");
++        System.clearProperty("fucktick.watchcat.heartbeatIntervalMs");
++    }
++
++    @Test
++    void heartbeatSuccessReturnsMeowPayload() {
++        WatchCat.instance().register(new TestTarget("test:ok", payload -> CompletableFuture.completedFuture(payload), WatchCatRecoveryResult.none("ok")));
++
++        final WatchCatPingResult result = WatchCat.instance().ping("test:ok", 1_000L);
++
++        assertTrue(result.ok());
++        assertEquals("Meow <3", result.response());
++    }
++
++    @Test
++    void timeoutRecordsIncidentAndRecoveryResult() throws Exception {
++        System.setProperty("fucktick.watchcat.heartbeatTimeoutMs", "25");
++        System.setProperty("fucktick.watchcat.heartbeatIntervalMs", "25");
++        WatchCat.instance().register(new TestTarget("test:timeout", payload -> new CompletableFuture<>(), WatchCatRecoveryResult.failed("still stuck")));
++
++        WatchCat.instance().start();
++
++        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
++        while (WatchCat.instance().incidents().isEmpty() && System.nanoTime() < deadline) {
++            Thread.sleep(10L);
++        }
++        assertFalse(WatchCat.instance().incidents().isEmpty());
++        final WatchCatIncident incident = WatchCat.instance().incidents().get(0);
++        assertEquals("test:timeout", incident.targetId());
++        assertEquals(WatchCatRecoveryAction.FAILED, incident.recoveryResult().action());
++    }
++
++    private record TestTarget(String id, Heartbeat heartbeat, WatchCatRecoveryResult recoveryResult) implements WatchCatTarget {
++
++        @Override
++        public WatchCatTargetSnapshot snapshot() {
++            return new WatchCatTargetSnapshot(this.id, this.id, WatchCatTargetKind.OTHER, Thread.currentThread().getName(), Thread.currentThread().threadId(), true, "test", Map.of());
++        }
++
++        @Override
++        public CompletableFuture<String> heartbeat(final String payload) {
++            return this.heartbeat.run(payload);
++        }
++
++        @Override
++        public WatchCatRecoveryResult recover(final String reason) {
++            return this.recoveryResult;
++        }
++    }
++
++    @FunctionalInterface
++    private interface Heartbeat {
++
++        CompletableFuture<String> run(String payload);
++    }
++}

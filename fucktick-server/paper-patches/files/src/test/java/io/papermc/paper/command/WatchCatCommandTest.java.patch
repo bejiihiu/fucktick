@@ -1,0 +1,29 @@
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/command/WatchCatCommandTest.java
+@@ -1,0 +_,26 @@
++package io.papermc.paper.command;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.mock;
++
++import java.util.List;
++import org.bukkit.command.CommandSender;
++import org.junit.jupiter.api.Test;
++
++class WatchCatCommandTest {
++
++    @Test
++    void watchCatAndMeowTabCompleteTopLevelCommands() {
++        final WatchCatCommand command = new WatchCatCommand("watchcat");
++        final CommandSender sender = mock(CommandSender.class);
++
++        final List<String> watchcat = command.tabComplete(sender, "watchcat", new String[] {""});
++        final List<String> meow = command.tabComplete(sender, "meow", new String[] {""});
++
++        assertEquals(watchcat, meow);
++        assertTrue(watchcat.contains("status"));
++        assertTrue(watchcat.contains("target"));
++        assertTrue(watchcat.contains("compute"));
++    }
++}

@@ -1,0 +1,81 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatServerBridge.java
+@@ -1,0 +_,78 @@
++package io.papermc.paper.fucktick.watchcat;
++
++import java.util.LinkedHashMap;
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import net.minecraft.server.MinecraftServer;
++
++public final class WatchCatServerBridge {
++
++    private static final AtomicBoolean REGISTERED = new AtomicBoolean();
++
++    private WatchCatServerBridge() {
++    }
++
++    public static void register(final MinecraftServer server) {
++        if (!REGISTERED.compareAndSet(false, true)) {
++            return;
++        }
++        // FuckTick Start - мост WatchCat к серверному watchdog
++        WatchCat.instance().register(new WatchCatTarget() {
++            @Override
++            public String id() {
++                return "server-watchdog";
++            }
++
++            @Override
++            public WatchCatTargetSnapshot snapshot() {
++                final Thread serverThread = server.serverThread;
++                final Map<String, String> details = new LinkedHashMap<>();
++                details.put("running", Boolean.toString(server.isRunning()));
++                details.put("stopped", Boolean.toString(server.hasStopped()));
++                details.put("watchdogStarted", Boolean.toString(org.spigotmc.WatchdogThread.hasStarted));
++                return new WatchCatTargetSnapshot(
++                    this.id(),
++                    "Server watchdog bridge",
++                    WatchCatTargetKind.SERVER_WATCHDOG,
++                    serverThread == null ? "" : serverThread.getName(),
++                    serverThread == null ? -1L : serverThread.threadId(),
++                    serverThread != null && serverThread.isAlive(),
++                    server.hasStopped() ? "stopped" : (server.isRunning() ? "running" : "stopping"),
++                    details
++                );
++            }
++
++            @Override
++            public CompletableFuture<String> heartbeat(final String payload) {
++                if (server.hasStopped()) {
++                    return CompletableFuture.failedFuture(new IllegalStateException("Server has stopped"));
++                }
++                return CompletableFuture.completedFuture(payload);
++            }
++
++            @Override
++            public WatchCatRecoveryResult recover(final String reason) {
++                if (server.hasStopped()) {
++                    return WatchCatRecoveryResult.none("Server is already stopped");
++                }
++                server.forceTicks = true;
++                server.abnormalExit = true;
++                server.safeShutdown(false, false);
++                try {
++                    Thread.sleep(TimeUnit.SECONDS.toMillis(1L));
++                } catch (final InterruptedException interruptedException) {
++                    Thread.currentThread().interrupt();
++                    return WatchCatRecoveryResult.escalate("Interrupted during server shutdown escalation");
++                }
++                if (!server.hasStopped()) {
++                    server.close();
++                }
++                return WatchCatRecoveryResult.shutdown("Server shutdown requested by WatchCat. reason=" + reason);
++            }
++        });
++        WatchCat.instance().start();
++        // FuckTick End
++    }
++}

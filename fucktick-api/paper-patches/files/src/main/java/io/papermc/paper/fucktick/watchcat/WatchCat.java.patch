@@ -1,0 +1,296 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCat.java
+@@ -1,0 +_,293 @@
++package io.papermc.paper.fucktick.watchcat;
++
++import java.lang.management.LockInfo;
++import java.lang.management.ManagementFactory;
++import java.lang.management.MonitorInfo;
++import java.lang.management.ThreadInfo;
++import java.lang.management.ThreadMXBean;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentLinkedDeque;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicLong;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.logging.Level;
++import java.util.logging.Logger;
++
++public final class WatchCat {
++
++    private static final WatchCat INSTANCE = new WatchCat();
++    private static final Logger LOGGER = Logger.getLogger("FuckTick WatchCat");
++
++    private final ConcurrentHashMap<String, WatchCatTarget> targets = new ConcurrentHashMap<>();
++    private final ConcurrentLinkedDeque<WatchCatIncident> incidents = new ConcurrentLinkedDeque<>();
++    private final AtomicLong incidentIds = new AtomicLong();
++    private final AtomicBoolean running = new AtomicBoolean();
++    private final AtomicBoolean escalating = new AtomicBoolean();
++    private final AtomicReference<Thread> monitorThread = new AtomicReference<>();
++
++    private WatchCat() {
++    }
++
++    public static WatchCat instance() {
++        return INSTANCE;
++    }
++
++    public static void shutdownIfInitialized() {
++        INSTANCE.shutdown();
++    }
++
++    public void register(final WatchCatTarget target) {
++        Objects.requireNonNull(target, "target");
++        this.targets.put(target.id(), target);
++    }
++
++    public void unregister(final String targetId) {
++        if (targetId != null) {
++            this.targets.remove(targetId);
++        }
++    }
++
++    public void start() {
++        if (!WatchCatSettings.enabled()) {
++            return;
++        }
++        if (!this.running.compareAndSet(false, true)) {
++            return;
++        }
++        final Thread thread = new Thread(this::runMonitor, "FuckTick WatchCat");
++        thread.setDaemon(true);
++        this.monitorThread.set(thread);
++        thread.start();
++    }
++
++    public void shutdown() {
++        this.running.set(false);
++        final Thread thread = this.monitorThread.getAndSet(null);
++        if (thread != null) {
++            thread.interrupt();
++        }
++    }
++
++    public boolean isRunning() {
++        return this.running.get();
++    }
++
++    void clearForTesting() {
++        this.shutdown();
++        this.targets.clear();
++        this.incidents.clear();
++        this.escalating.set(false);
++    }
++
++    public List<WatchCatTargetSnapshot> targetSnapshots() {
++        return this.targets.values().stream()
++            .map(this::safeSnapshot)
++            .sorted(Comparator.comparing(WatchCatTargetSnapshot::id, String.CASE_INSENSITIVE_ORDER))
++            .toList();
++    }
++
++    public WatchCatTargetSnapshot targetSnapshot(final String targetId) {
++        final WatchCatTarget target = this.targets.get(targetId);
++        return target == null ? null : this.safeSnapshot(target);
++    }
++
++    public List<WatchCatIncident> incidents() {
++        return new ArrayList<>(this.incidents).stream()
++            .sorted(Comparator.comparingLong(WatchCatIncident::id).reversed())
++            .toList();
++    }
++
++    public WatchCatPingResult ping(final String targetId, final long timeoutMs) {
++        final WatchCatTarget target = this.targets.get(targetId);
++        if (target == null) {
++            return new WatchCatPingResult(targetId, false, 0L, "", "Unknown WatchCat target");
++        }
++        final long started = System.nanoTime();
++        try {
++            final String response = target.heartbeat(WatchCatSettings.heartbeatPayload()).get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
++            final long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
++            final boolean ok = WatchCatSettings.heartbeatPayload().equals(response);
++            return new WatchCatPingResult(targetId, ok, durationMs, response, ok ? "" : "Unexpected heartbeat response");
++        } catch (final InterruptedException ex) {
++            Thread.currentThread().interrupt();
++            return new WatchCatPingResult(targetId, false, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), "", "Interrupted while waiting for heartbeat");
++        } catch (final ExecutionException | TimeoutException ex) {
++            return new WatchCatPingResult(targetId, false, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), "", ex.toString());
++        }
++    }
++
++    public WatchCatRecoveryResult recover(final String targetId, final String reason) {
++        final WatchCatTarget target = this.targets.get(targetId);
++        if (target == null) {
++            return WatchCatRecoveryResult.unavailable("Unknown WatchCat target: " + targetId);
++        }
++        return this.recordAndRecover(target, reason == null || reason.isBlank() ? "manual recovery" : reason);
++    }
++
++    private void runMonitor() {
++        while (this.running.get()) {
++            try {
++                this.checkTargets();
++                Thread.sleep(WatchCatSettings.heartbeatIntervalMs());
++            } catch (final InterruptedException ex) {
++                if (!this.running.get()) {
++                    return;
++                }
++            } catch (final Throwable throwable) {
++                LOGGER.log(Level.SEVERE, "WatchCat monitor loop failed", throwable);
++            }
++        }
++    }
++
++    private void checkTargets() {
++        final List<WatchCatTarget> activeTargets = this.targets.values().stream()
++            .filter(WatchCatTarget::enabled)
++            .toList();
++        if (activeTargets.isEmpty()) {
++            return;
++        }
++        final List<Probe> probes = activeTargets.stream()
++            .map(target -> new Probe(target, this.safeHeartbeat(target)))
++            .toList();
++        final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WatchCatSettings.heartbeatTimeoutMs());
++        for (final Probe probe : probes) {
++            final long remainingNanos = deadlineNanos - System.nanoTime();
++            if (remainingNanos <= 0L) {
++                probe.future.cancel(true);
++                this.recordAndRecover(probe.target, "heartbeat timeout after " + WatchCatSettings.heartbeatTimeoutMs() + "ms");
++                continue;
++            }
++            try {
++                final String response = probe.future.get(remainingNanos, TimeUnit.NANOSECONDS);
++                if (!WatchCatSettings.heartbeatPayload().equals(response)) {
++                    this.recordAndRecover(probe.target, "unexpected heartbeat response: " + response);
++                }
++            } catch (final InterruptedException ex) {
++                Thread.currentThread().interrupt();
++                return;
++            } catch (final TimeoutException ex) {
++                probe.future.cancel(true);
++                this.recordAndRecover(probe.target, "heartbeat timeout after " + WatchCatSettings.heartbeatTimeoutMs() + "ms");
++            } catch (final ExecutionException ex) {
++                this.recordAndRecover(probe.target, "heartbeat failed: " + ex.getCause());
++            }
++        }
++    }
++
++    private CompletableFuture<String> safeHeartbeat(final WatchCatTarget target) {
++        try {
++            return Objects.requireNonNull(target.heartbeat(WatchCatSettings.heartbeatPayload()), "heartbeat future");
++        } catch (final Throwable throwable) {
++            return CompletableFuture.failedFuture(throwable);
++        }
++    }
++
++    private WatchCatRecoveryResult recordAndRecover(final WatchCatTarget target, final String reason) {
++        final WatchCatTargetSnapshot snapshot = this.safeSnapshot(target);
++        final String dump = this.dumpThread(snapshot.threadId());
++        final WatchCatRecoveryResult result;
++        try {
++            result = Objects.requireNonNull(target.recover(reason), "recovery result");
++        } catch (final Throwable throwable) {
++            LOGGER.log(Level.SEVERE, "WatchCat recovery threw for target " + target.id(), throwable);
++            final WatchCatRecoveryResult failed = WatchCatRecoveryResult.escalate("Recovery threw: " + throwable);
++            this.addIncident(snapshot, reason, dump, failed);
++            this.escalate(snapshot, reason);
++            return failed;
++        }
++        this.addIncident(snapshot, reason, dump, result);
++        if (result.escalate()) {
++            this.escalate(snapshot, reason);
++        }
++        return result;
++    }
++
++    private void addIncident(final WatchCatTargetSnapshot snapshot, final String reason, final String dump, final WatchCatRecoveryResult result) {
++        final WatchCatIncident incident = new WatchCatIncident(
++            this.incidentIds.incrementAndGet(),
++            snapshot.id(),
++            snapshot.displayName(),
++            snapshot.kind(),
++            System.currentTimeMillis(),
++            reason,
++            dump,
++            result
++        );
++        this.incidents.addFirst(incident);
++        while (this.incidents.size() > WatchCatSettings.incidentLimit()) {
++            this.incidents.pollLast();
++        }
++        final Level level = result.escalate() ? Level.SEVERE : Level.WARNING;
++        LOGGER.log(level, "WatchCat incident target=" + snapshot.id() + " reason=" + reason + " action=" + result.action() + " recovered=" + result.recovered());
++    }
++
++    private void escalate(final WatchCatTargetSnapshot failedTarget, final String reason) {
++        if (!this.escalating.compareAndSet(false, true)) {
++            return;
++        }
++        final WatchCatTarget target = this.targets.get("server-watchdog");
++        if (target == null) {
++            LOGGER.severe("WatchCat could not escalate because server-watchdog target is not registered. failedTarget=" + failedTarget.id());
++            return;
++        }
++        try {
++            target.recover("WatchCat escalation from " + failedTarget.id() + ": " + reason);
++        } catch (final Throwable throwable) {
++            LOGGER.log(Level.SEVERE, "WatchCat server escalation failed", throwable);
++        }
++    }
++
++    private WatchCatTargetSnapshot safeSnapshot(final WatchCatTarget target) {
++        try {
++            return Objects.requireNonNull(target.snapshot(), "target snapshot");
++        } catch (final Throwable throwable) {
++            return new WatchCatTargetSnapshot(target.id(), target.id(), WatchCatTargetKind.OTHER, "", -1L, false, "snapshot-failed", Map.of("failure", throwable.toString()));
++        }
++    }
++
++    private String dumpThread(final long threadId) {
++        if (threadId <= 0L) {
++            return "";
++        }
++        final ThreadMXBean bean = ManagementFactory.getThreadMXBean();
++        final ThreadInfo[] infos = bean.getThreadInfo(new long[] {threadId}, true, true, Integer.MAX_VALUE);
++        final ThreadInfo info = infos.length == 0 ? null : infos[0];
++        if (info == null) {
++            return "";
++        }
++        final StringBuilder builder = new StringBuilder();
++        builder.append("Current Thread: ").append(info.getThreadName()).append('\n');
++        builder.append("\tPID: ").append(info.getThreadId())
++            .append(" | Suspended: ").append(info.isSuspended())
++            .append(" | Native: ").append(info.isInNative())
++            .append(" | State: ").append(info.getThreadState())
++            .append('\n');
++        final LockInfo lockInfo = info.getLockInfo();
++        if (lockInfo != null) {
++            builder.append("\tWaiting on: ").append(lockInfo).append('\n');
++        }
++        if (info.getLockedMonitors().length != 0) {
++            builder.append("\tThread is waiting on monitor(s):\n");
++            for (final MonitorInfo monitor : info.getLockedMonitors()) {
++                builder.append("\t\tLocked on:").append(monitor.getLockedStackFrame()).append('\n');
++            }
++        }
++        builder.append("\tStack:\n");
++        for (final StackTraceElement element : info.getStackTrace()) {
++            builder.append("\t\t").append(element).append('\n');
++        }
++        return builder.toString();
++    }
++
++    private record Probe(WatchCatTarget target, CompletableFuture<String> future) {
++    }
++}

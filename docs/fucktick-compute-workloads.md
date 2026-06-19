@@ -16,8 +16,8 @@ If a workload cannot follow that rule, it does not get moved just because it is 
 
 | Workload | Compute task type | Current entry point | Owner/live boundary |
 | --- | --- | --- | --- |
-| Diagnostics formatting | `DIAGNOSTIC_FORMAT` | `/fucktick compute ...`, plugin dump, queue, routing views | Caller gathers counters and short sections, worker formats text, caller sends output. |
-| Routing metadata warmup | `ROUTING_METADATA_WARMUP` | `/fucktick plugin <name> routing` and plugin enable warmup | Server snapshots listener class names and plugin command labels, worker validates metadata strings. |
+| Diagnostics formatting | `DIAGNOSTIC_FORMAT` | `/watchcat compute ...`, plugin dump, queue, routing views | Caller gathers counters and short sections, worker formats text, caller sends output. |
+| Routing metadata warmup | `ROUTING_METADATA_WARMUP` | `/watchcat plugin <name> routing` and plugin enable warmup | Server snapshots listener class names and plugin command labels, worker validates metadata strings. |
 | Chunk save NBT serialization | `CHUNK_SAVE_SERIALIZE` | `NewChunkHolder.saveChunk(...)` | Region/chunk owner creates `SerializableChunkData`, worker runs `chunkData.write()`, Moonrise region IO writes the resulting `CompoundTag`. |
 | Payload write helper | dedicated compute IO worker | `FuckTickComputeIoWorkerPool.writeChunkPayload(...)` | Generic compute workers never block on this payload write path. |
 

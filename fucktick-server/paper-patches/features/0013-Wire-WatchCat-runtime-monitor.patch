@@ -1,0 +1,851 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bungeepithub@gmail.com>
+Date: Fri, 19 Jun 2026 14:34:45 +0500
+Subject: [PATCH] Wire WatchCat runtime monitor
+
+
+diff --git a/src/main/java/io/papermc/paper/command/FuckTickCommand.java b/src/main/java/io/papermc/paper/command/FuckTickCommand.java
+deleted file mode 100644
+index 0c1afc637ac4f5579aa761425186cf45a5c24f83..0000000000000000000000000000000000000000
+--- a/src/main/java/io/papermc/paper/command/FuckTickCommand.java
++++ /dev/null
+@@ -1,337 +0,0 @@
+-package io.papermc.paper.command;
+-
+-import io.papermc.paper.fucktick.compute.ComputeBrokerSnapshot;
+-import io.papermc.paper.fucktick.compute.ComputeApplyDecision;
+-import io.papermc.paper.fucktick.compute.ComputeCancellationToken;
+-import io.papermc.paper.fucktick.compute.ComputeGeneration;
+-import io.papermc.paper.fucktick.compute.ComputePriority;
+-import io.papermc.paper.fucktick.compute.ComputeTaskHandle;
+-import io.papermc.paper.fucktick.compute.ComputeTaskOwner;
+-import io.papermc.paper.fucktick.compute.ComputeTaskSnapshot;
+-import io.papermc.paper.fucktick.compute.ComputeTaskState;
+-import io.papermc.paper.fucktick.compute.ComputeTaskType;
+-import io.papermc.paper.fucktick.compute.ComputeTaskTypeSnapshot;
+-import io.papermc.paper.fucktick.compute.ComputeWorkerSnapshot;
+-import io.papermc.paper.fucktick.compute.FuckTickComputeBroker;
+-import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingResult;
+-import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingSnapshot;
+-import io.papermc.paper.fucktick.compute.workload.FuckTickComputeWorkloads;
+-import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupResult;
+-import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupSnapshot;
+-import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
+-import io.papermc.paper.fucktick.plugin.PluginRuntimeSnapshot;
+-import java.io.PrintWriter;
+-import java.io.StringWriter;
+-import java.text.DecimalFormat;
+-import java.util.ArrayList;
+-import java.util.Comparator;
+-import java.util.LinkedHashMap;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.concurrent.TimeUnit;
+-import org.bukkit.Bukkit;
+-import org.bukkit.command.Command;
+-import org.bukkit.command.CommandSender;
+-import org.bukkit.permissions.Permission;
+-import org.bukkit.permissions.PermissionDefault;
+-import org.jetbrains.annotations.NotNull;
+-
+-public final class FuckTickCommand extends Command {
+-
+-    private static final ThreadLocal<DecimalFormat> ONE_DECIMAL = ThreadLocal.withInitial(() -> new DecimalFormat("#,##0.0"));
+-
+-    public FuckTickCommand(final String name) {
+-        super(name);
+-        this.description = "FuckTick diagnostics";
+-        this.usageMessage = "/fucktick plugins threads | /fucktick plugin <name> dump|queue|routing | /fucktick compute status|workers|queue|tasks|task <id>";
+-        this.setPermission("bukkit.command.fucktick");
+-        Bukkit.getPluginManager().addPermission(new Permission("bukkit.command.fucktick", PermissionDefault.OP));
+-    }
+-
+-    @Override
+-    public boolean execute(final @NotNull CommandSender sender, final @NotNull String commandLabel, final @NotNull String[] args) {
+-        if (!this.testPermission(sender)) {
+-            return true;
+-        }
+-        // FuckTick Start - диагностика compute broker
+-        if (args.length >= 2 && args[0].equalsIgnoreCase("compute")) {
+-            this.sendCompute(sender, args);
+-            return true;
+-        }
+-        // FuckTick End
+-        if (args.length >= 2 && args[0].equalsIgnoreCase("plugins") && args[1].equalsIgnoreCase("threads")) {
+-            this.sendThreads(sender);
+-            return true;
+-        }
+-        if (args.length >= 3 && args[0].equalsIgnoreCase("plugin")) {
+-            final PluginRuntimeSnapshot snapshot = PluginFUCKLOADER.instance().snapshot(args[1]);
+-            if (snapshot == null) {
+-                sender.sendMessage("Unknown plugin runtime: " + args[1]);
+-                return true;
+-            }
+-            switch (args[2].toLowerCase(java.util.Locale.ROOT)) {
+-                case "dump" -> this.sendDump(sender, snapshot);
+-                case "queue" -> this.sendQueue(sender, snapshot);
+-                case "routing" -> this.sendRouting(sender, snapshot);
+-                default -> sender.sendMessage("Usage: " + this.usageMessage);
+-            }
+-            return true;
+-        }
+-        sender.sendMessage("Usage: " + this.usageMessage);
+-        return true;
+-    }
+-
+-    @Override
+-    public @NotNull List<String> tabComplete(final @NotNull CommandSender sender, final @NotNull String alias, final @NotNull String[] args) throws IllegalArgumentException {
+-        if (args.length == 1) {
+-            return matchingLast(args, List.of("plugins", "plugin", "compute"));
+-        }
+-        if (args.length == 2 && args[0].equalsIgnoreCase("plugins")) {
+-            return matchingLast(args, List.of("threads"));
+-        }
+-        if (args.length == 2 && args[0].equalsIgnoreCase("plugin")) {
+-            return matchingLast(args, PluginFUCKLOADER.instance().snapshots().stream().map(PluginRuntimeSnapshot::pluginName).toList());
+-        }
+-        if (args.length == 3 && args[0].equalsIgnoreCase("plugin")) {
+-            return matchingLast(args, List.of("dump", "queue", "routing"));
+-        }
+-        // FuckTick Start - tab-complete диагностики compute broker
+-        if (args.length == 2 && args[0].equalsIgnoreCase("compute")) {
+-            return matchingLast(args, List.of("status", "workers", "queue", "tasks", "task"));
+-        }
+-        if (args.length == 3 && args[0].equalsIgnoreCase("compute") && args[1].equalsIgnoreCase("task")) {
+-            return matchingLast(args, FuckTickComputeBroker.instance().snapshot().tasks().stream().map(task -> Long.toString(task.id())).toList());
+-        }
+-        // FuckTick End
+-        return List.of();
+-    }
+-
+-    private static List<String> matchingLast(final String[] args, final List<String> values) {
+-        final String token = args.length == 0 ? "" : args[args.length - 1].toLowerCase(java.util.Locale.ROOT);
+-        return values.stream().filter(value -> value.toLowerCase(java.util.Locale.ROOT).startsWith(token)).toList();
+-    }
+-
+-    private void sendThreads(final CommandSender sender) {
+-        final List<PluginRuntimeSnapshot> snapshots = PluginFUCKLOADER.instance().snapshots();
+-        if (snapshots.isEmpty()) {
+-            sender.sendMessage("No plugin runtimes registered.");
+-            return;
+-        }
+-        this.sendDiagnostic(sender, "Plugin threads", Map.of("plugins", Integer.toString(snapshots.size())), snapshots.stream()
+-            .map(snapshot -> snapshot.pluginName() + " state=" + snapshot.state() + " thread=\"" + snapshot.threadName() + "\" tid=" + snapshot.threadId() + " queued=" + snapshot.queuedTasks())
+-            .toList());
+-    }
+-
+-    private void sendDump(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
+-        final Map<String, String> counters = new LinkedHashMap<>();
+-        counters.put("state", snapshot.state().name());
+-        counters.put("threadId", Long.toString(snapshot.threadId()));
+-        counters.put("queued", Integer.toString(snapshot.queuedTasks()));
+-        counters.put("resultQueue", Integer.toString(snapshot.resultQueueSize()));
+-        counters.put("lastTaskMs", Long.toString(snapshot.lastTaskDurationMs()));
+-        counters.put("averageTaskMs", Long.toString(snapshot.averageTaskDurationMs()));
+-        counters.put("blockedCallers", Integer.toString(snapshot.blockedCallers()));
+-        final List<String> sections = new ArrayList<>();
+-        sections.add("Plugin: " + snapshot.pluginName());
+-        sections.add("Thread: " + snapshot.threadName());
+-        sections.add("Running task: " + snapshot.runningTask());
+-        sections.add("Last owner context: " + snapshot.lastOwnerContext());
+-        final Throwable failure = PluginFUCKLOADER.instance().failure(snapshot.pluginName());
+-        if (failure != null) {
+-            final StringWriter writer = new StringWriter();
+-            failure.printStackTrace(new PrintWriter(writer));
+-            sections.add("Failure: " + writer);
+-        }
+-        this.sendDiagnostic(sender, "Plugin dump", counters, sections);
+-    }
+-
+-    private void sendQueue(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
+-        this.sendDiagnostic(sender, "Plugin queue", Map.of(
+-            "lifecycleQueued", Integer.toString(snapshot.lifecycleQueuedTasks()),
+-            "callbackQueued", Integer.toString(snapshot.queuedTasks()),
+-            "resultQueue", Integer.toString(snapshot.resultQueueSize()),
+-            "blockedCallers", Integer.toString(snapshot.blockedCallers())
+-        ), List.of("Plugin: " + snapshot.pluginName()));
+-    }
+-
+-    private void sendRouting(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
+-        final RoutingMetadataWarmupSnapshot routingSnapshot = new RoutingMetadataWarmupSnapshot(
+-            ComputeGeneration.of(System.nanoTime()),
+-            snapshot.pluginName(),
+-            List.of(snapshot.pluginName() + ".runtime"),
+-            List.of("commands", "tab-complete", "asyncScheduler", "regionScheduler", "entityScheduler", "globalScheduler")
+-        );
+-        final ComputeTaskHandle<RoutingMetadataWarmupResult> handle = FuckTickComputeBroker.instance().submit(
+-            ComputeTaskType.ROUTING_METADATA_WARMUP,
+-            ComputePriority.BACKGROUND_WARMUP,
+-            new ComputeTaskOwner(null, snapshot.pluginName()),
+-            "routing metadata warmup for " + snapshot.pluginName(),
+-            routingSnapshot,
+-            FuckTickComputeWorkloads::routingMetadataWarmup,
+-            Runnable::run,
+-            (context, result) -> ComputeApplyDecision.APPLIED
+-        );
+-        final RoutingMetadataWarmupResult result = handle.awaitResultOrFallback(250L, TimeUnit.MILLISECONDS, () -> FuckTickComputeWorkloads.routingMetadataWarmup(routingSnapshot, new ComputeCancellationToken()));
+-        final List<String> sections = new ArrayList<>();
+-        sections.add("Plugin: " + snapshot.pluginName());
+-        sections.add("Commands: plugin-thread blocking result");
+-        sections.add("Tab-complete: plugin-thread blocking result");
+-        sections.add("AsyncScheduler: plugin-thread");
+-        sections.add("RegionScheduler: owner-thread");
+-        sections.add("EntityScheduler: owner-thread");
+-        sections.add("GlobalRegionScheduler: owner-thread");
+-        sections.add("Unknown events: owner-only");
+-        result.warnings().forEach(warning -> sections.add("Warning: " + warning));
+-        this.sendDiagnostic(sender, "Plugin routing", Map.of(
+-            "listenersScanned", Integer.toString(result.listenersScanned()),
+-            "commandsScanned", Integer.toString(result.commandsScanned())
+-        ), sections);
+-    }
+-
+-    // FuckTick Start - вывод состояния compute broker
+-    private void sendCompute(final CommandSender sender, final String[] args) {
+-        final ComputeBrokerSnapshot snapshot = FuckTickComputeBroker.instance().snapshot();
+-        switch (args[1].toLowerCase(java.util.Locale.ROOT)) {
+-            case "status" -> this.sendComputeStatus(sender, snapshot);
+-            case "workers" -> this.sendComputeWorkers(sender, snapshot);
+-            case "queue" -> this.sendComputeQueue(sender, snapshot);
+-            case "tasks" -> this.sendComputeTasks(sender, snapshot);
+-            case "task" -> {
+-                if (args.length < 3) {
+-                    sender.sendMessage("Usage: /fucktick compute task <id>");
+-                    return;
+-                }
+-                try {
+-                    this.sendComputeTask(sender, Long.parseLong(args[2]));
+-                } catch (final NumberFormatException ex) {
+-                    sender.sendMessage("Compute task id must be a number: " + args[2]);
+-                }
+-            }
+-            default -> sender.sendMessage("Usage: " + this.usageMessage);
+-        }
+-    }
+-
+-    private void sendComputeStatus(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
+-        final long completed = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::completed).sum();
+-        final long applied = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::applied).sum();
+-        final long stale = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::stale).sum();
+-        final long rejected = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::rejected).sum();
+-        final List<String> sections = new ArrayList<>();
+-        sections.add("Top task types:");
+-        snapshot.taskTypes().stream()
+-            .filter(type -> type.submitted() > 0L || type.rejected() > 0L)
+-            .sorted(Comparator.comparingLong(ComputeTaskTypeSnapshot::submitted).reversed())
+-            .limit(8L)
+-            .forEach(type -> sections.add(type.type()
+-                + " queued=" + type.queued()
+-                + " running=" + type.running()
+-                + " avgCompute=" + ONE_DECIMAL.get().format(type.averageComputeTimeMs()) + "ms"
+-                + " stale=" + type.stale()
+-                + " rejected=" + type.rejected()));
+-        this.sendDiagnostic(sender, "Compute Broker", Map.of(
+-            "workers", Integer.toString(snapshot.workerCount()),
+-            "queued", Integer.toString(snapshot.queuedTasks()),
+-            "running", Integer.toString(snapshot.runningTasks()),
+-            "completed", Long.toString(completed),
+-            "applied", Long.toString(applied),
+-            "stale", Long.toString(stale),
+-            "rejected", Long.toString(rejected),
+-            "shutdown", Boolean.toString(snapshot.shutdown())
+-        ), sections);
+-    }
+-
+-    private void sendComputeWorkers(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
+-        this.sendDiagnostic(sender, "Compute workers", Map.of("workers", Integer.toString(snapshot.workers().size())), snapshot.workers().stream()
+-            .map(worker -> worker.name() + " alive=" + worker.alive() + " task=" + (worker.taskId() == null ? "-" : worker.taskId()))
+-            .toList());
+-    }
+-
+-    private void sendComputeQueue(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
+-        final List<ComputeTaskSnapshot> queued = snapshot.tasks().stream()
+-            .filter(task -> task.state() == ComputeTaskState.QUEUED || task.state() == ComputeTaskState.SNAPSHOTTED || task.state() == ComputeTaskState.SUBMITTED)
+-            .sorted(Comparator.comparing(ComputeTaskSnapshot::priority).thenComparingLong(ComputeTaskSnapshot::id))
+-            .limit(20L)
+-            .toList();
+-        if (queued.isEmpty()) {
+-            sender.sendMessage("Compute queue is empty.");
+-            return;
+-        }
+-        this.sendDiagnostic(sender, "Compute queue", Map.of("queued", Integer.toString(queued.size())), queued.stream().map(this::formatComputeTaskLine).toList());
+-    }
+-
+-    private void sendComputeTasks(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
+-        final List<ComputeTaskSnapshot> tasks = snapshot.tasks().stream().limit(20L).toList();
+-        if (tasks.isEmpty()) {
+-            sender.sendMessage("No compute tasks tracked.");
+-            return;
+-        }
+-        this.sendDiagnostic(sender, "Compute tasks", Map.of("tracked", Integer.toString(tasks.size())), tasks.stream().map(this::formatComputeTaskLine).toList());
+-    }
+-
+-    private void sendComputeTask(final CommandSender sender, final long taskId) {
+-        final ComputeTaskSnapshot task = FuckTickComputeBroker.instance().taskSnapshot(taskId);
+-        if (task == null) {
+-            sender.sendMessage("Unknown compute task: " + taskId);
+-            return;
+-        }
+-        final Map<String, String> counters = new LinkedHashMap<>();
+-        counters.put("id", Long.toString(task.id()));
+-        counters.put("generation", Long.toString(task.generation().value()));
+-        counters.put("queueTime", millisOrDash(task.queueTimeMs()));
+-        counters.put("computeTime", millisOrDash(task.computeTimeMs()));
+-        counters.put("applyDelay", millisOrDash(task.applyDelayMs()));
+-        final List<String> sections = new ArrayList<>();
+-        sections.add("Type: " + task.type());
+-        sections.add("Priority: " + task.priority());
+-        sections.add("State: " + task.state());
+-        sections.add("Owner: " + task.owner().displayName());
+-        sections.add("Description: " + task.description());
+-        sections.add("Worker thread: " + blankDash(task.workerThread()));
+-        sections.add("Apply thread: " + blankDash(task.applyThread()));
+-        if (task.cancelled()) {
+-            sections.add("Cancellation: " + blankDash(task.cancellationReason()));
+-        }
+-        if (!task.failureMessage().isBlank()) {
+-            sections.add("Failure: " + task.failureMessage());
+-        }
+-        this.sendDiagnostic(sender, "Compute task", counters, sections);
+-    }
+-
+-    private String formatComputeTaskLine(final ComputeTaskSnapshot task) {
+-        return "#" + task.id()
+-            + " " + task.type()
+-            + " state=" + task.state()
+-            + " priority=" + task.priority()
+-            + " owner=" + task.owner().displayName()
+-            + " queue=" + millisOrDash(task.queueTimeMs())
+-            + " compute=" + millisOrDash(task.computeTimeMs())
+-            + " description=\"" + task.description() + "\"";
+-    }
+-
+-    private static String millisOrDash(final long millis) {
+-        return millis < 0L ? "-" : millis + "ms";
+-    }
+-
+-    private static String blankDash(final String value) {
+-        return value == null || value.isBlank() ? "-" : value;
+-    }
+-
+-    private void sendDiagnostic(final CommandSender sender, final String reportName, final Map<String, String> counters, final List<String> sections) {
+-        final DiagnosticFormattingSnapshot snapshot = new DiagnosticFormattingSnapshot(ComputeGeneration.of(System.nanoTime()), reportName, counters, sections);
+-        final ComputeTaskHandle<DiagnosticFormattingResult> handle = FuckTickComputeBroker.instance().submit(
+-            ComputeTaskType.DIAGNOSTIC_FORMAT,
+-            ComputePriority.LOW_DIAGNOSTICS,
+-            ComputeTaskOwner.SERVER,
+-            "diagnostic format " + reportName,
+-            snapshot,
+-            FuckTickComputeWorkloads::diagnosticFormat,
+-            Runnable::run,
+-            (context, result) -> ComputeApplyDecision.APPLIED
+-        );
+-        final DiagnosticFormattingResult result = handle.awaitResultOrFallback(250L, TimeUnit.MILLISECONDS, () -> FuckTickComputeWorkloads.diagnosticFormat(snapshot, new ComputeCancellationToken()));
+-        for (final String line : result.formattedText().split("\\R")) {
+-            sender.sendMessage(line);
+-        }
+-    }
+-    // FuckTick End
+-}
+diff --git a/src/main/java/io/papermc/paper/command/PaperCommands.java b/src/main/java/io/papermc/paper/command/PaperCommands.java
+index d6613e69eb50f4e74fe27799ceb300c6fb9e33e6..f6076edb249c773543a42ab19cc972f0c1830795 100644
+--- a/src/main/java/io/papermc/paper/command/PaperCommands.java
++++ b/src/main/java/io/papermc/paper/command/PaperCommands.java
+@@ -3,6 +3,7 @@ package io.papermc.paper.command;
+ import com.mojang.brigadier.tree.LiteralCommandNode;
+ import io.papermc.paper.command.brigadier.CommandRegistrationFlag;
+ import io.papermc.paper.command.brigadier.CommandSourceStack;
++import io.papermc.paper.fucktick.watchcat.WatchCatServerBridge;
+ import net.minecraft.server.MinecraftServer;
+ import org.bukkit.command.Command;
+ 
+@@ -26,8 +27,9 @@ public final class PaperCommands {
+         COMMANDS.put("mspt", new MSPTCommand("mspt"));
+         COMMANDS.put("tps", new io.papermc.paper.threadedregions.commands.CommandServerHealth()); // Folia - region threading
+         COMMANDS.put("profiler", new io.papermc.paper.threadedregions.commands.CommandProfiler()); // Folia - region threading - profiler
+-        // FuckTick Start - диагностическая команда runtime плагинов
+-        COMMANDS.put("fucktick", new FuckTickCommand("fucktick"));
++        // FuckTick Start - единая команда WatchCat
++        WatchCatServerBridge.register(server);
++        COMMANDS.put("watchcat", new WatchCatCommand("watchcat"));
+         // FuckTick End
+ 
+         COMMANDS.forEach((s, command) -> {
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerPool.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerPool.java
+index 3b87581297fe90e5740702bbea39d4a349a8de00..4afb17f7c9cfa2190c4d7619e1c2853adcfe2434 100644
+--- a/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerPool.java
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerPool.java
+@@ -1,10 +1,22 @@
+ package io.papermc.paper.fucktick.compute;
+ 
++import io.papermc.paper.fucktick.watchcat.WatchCat;
++import io.papermc.paper.fucktick.watchcat.WatchCatPingResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatSettings;
++import io.papermc.paper.fucktick.watchcat.WatchCatTarget;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetKind;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetSnapshot;
+ import java.util.ArrayList;
+ import java.util.Comparator;
+ import java.util.List;
++import java.util.Map;
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.PriorityBlockingQueue;
++import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
+@@ -13,7 +25,7 @@ final class ComputeWorkerPool {
+     private final FuckTickComputeBroker broker;
+     private final ComputeBudgetPolicy policy;
+     private final PriorityBlockingQueue<ComputeTask<?, ?>> queue = new PriorityBlockingQueue<>();
+-    private final List<Thread> workers = new ArrayList<>();
++    private final List<WorkerHandle> workers = new ArrayList<>();
+     private final ConcurrentHashMap<String, Long> workerTasks = new ConcurrentHashMap<>();
+     private final AtomicInteger queuedTasks = new AtomicInteger();
+     private final AtomicBoolean shutdown = new AtomicBoolean();
+@@ -22,15 +34,13 @@ final class ComputeWorkerPool {
+         this.broker = broker;
+         this.policy = policy;
+         for (int i = 1; i <= policy.workerCount(); ++i) {
+-            final Thread thread = new Thread(this::runWorker, "FuckTick Compute Worker - " + i);
+-            thread.setDaemon(true);
+-            this.workers.add(thread);
++            this.workers.add(new WorkerHandle(i));
+         }
+     }
+ 
+     void start() {
+-        for (final Thread worker : this.workers) {
+-            worker.start();
++        for (final WorkerHandle worker : this.workers) {
++            worker.startNewThread();
+         }
+     }
+ 
+@@ -53,7 +63,7 @@ final class ComputeWorkerPool {
+ 
+     List<ComputeWorkerSnapshot> snapshotWorkers() {
+         return this.workers.stream()
+-            .map(worker -> new ComputeWorkerSnapshot(worker.getName(), worker.isAlive(), this.workerTasks.get(worker.getName())))
++            .map(WorkerHandle::snapshotWorker)
+             .toList();
+     }
+ 
+@@ -61,7 +71,7 @@ final class ComputeWorkerPool {
+         if (!this.shutdown.compareAndSet(false, true)) {
+             return;
+         }
+-        for (final Thread worker : this.workers) {
++        for (final WorkerHandle worker : this.workers) {
+             worker.interrupt();
+         }
+         final List<ComputeTask<?, ?>> drained = new ArrayList<>();
+@@ -72,13 +82,15 @@ final class ComputeWorkerPool {
+             this.broker.finishWithoutRunning(task, ComputeTaskState.CANCELLED, "");
+         }
+         final long deadline = System.currentTimeMillis() + waitMs;
+-        for (final Thread worker : this.workers) {
++        for (final WorkerHandle worker : this.workers) {
+             final long remaining = Math.max(1L, deadline - System.currentTimeMillis());
+             try {
+                 worker.join(remaining);
+             } catch (final InterruptedException ex) {
+                 Thread.currentThread().interrupt();
+                 return;
++            } finally {
++                worker.unregister();
+             }
+         }
+     }
+@@ -117,24 +129,172 @@ final class ComputeWorkerPool {
+         return true;
+     }
+ 
+-    private void runWorker() {
++    private void runWorker(final WorkerHandle worker) {
+         while (!this.shutdown.get()) {
++            final ControlTask controlTask = worker.controlTasks.poll();
++            if (controlTask != null) {
++                controlTask.future.complete(controlTask.payload);
++                continue;
++            }
+             final ComputeTask<?, ?> task;
+             try {
+-                task = this.queue.take();
++                task = this.queue.poll(250L, TimeUnit.MILLISECONDS);
+             } catch (final InterruptedException ex) {
+                 if (this.shutdown.get()) {
+                     return;
+                 }
+                 continue;
+             }
++            if (task == null) {
++                continue;
++            }
+             this.queuedTasks.decrementAndGet();
++            worker.runningTask = task;
+             this.workerTasks.put(Thread.currentThread().getName(), task.id);
+             try {
+                 this.broker.runTask(task);
+             } finally {
+                 this.workerTasks.remove(Thread.currentThread().getName(), task.id);
++                worker.runningTask = null;
++            }
++        }
++    }
++
++    // FuckTick Start - управляемый compute worker для WatchCat
++    private final class WorkerHandle {
++
++        private final int index;
++        private final String targetId;
++        private final BlockingQueue<ControlTask> controlTasks = new LinkedBlockingQueue<>();
++        private volatile Thread thread;
++        private volatile ComputeTask<?, ?> runningTask;
++
++        private WorkerHandle(final int index) {
++            this.index = index;
++            this.targetId = "compute-worker:" + index;
++            WatchCat.instance().register(new WatchCatTarget() {
++                @Override
++                public String id() {
++                    return WorkerHandle.this.targetId;
++                }
++
++                @Override
++                public WatchCatTargetSnapshot snapshot() {
++                    return WorkerHandle.this.watchCatSnapshot();
++                }
++
++                @Override
++                public CompletableFuture<String> heartbeat(final String payload) {
++                    return WorkerHandle.this.heartbeat(payload);
++                }
++
++                @Override
++                public WatchCatRecoveryResult recover(final String reason) {
++                    return WorkerHandle.this.recover(reason);
++                }
++
++                @Override
++                public boolean enabled() {
++                    return !ComputeWorkerPool.this.shutdown.get();
++                }
++            });
++        }
++
++        private synchronized void startNewThread() {
++            if (this.thread != null && this.thread.isAlive()) {
++                return;
+             }
++            final Thread created = new Thread(() -> ComputeWorkerPool.this.runWorker(this), "FuckTick Compute Worker - " + this.index);
++            created.setDaemon(true);
++            this.thread = created;
++            created.start();
+         }
++
++        private ComputeWorkerSnapshot snapshotWorker() {
++            final Thread current = this.thread;
++            return new ComputeWorkerSnapshot(current == null ? "FuckTick Compute Worker - " + this.index : current.getName(), current != null && current.isAlive(), this.runningTask == null ? null : this.runningTask.id);
++        }
++
++        private WatchCatTargetSnapshot watchCatSnapshot() {
++            final Thread current = this.thread;
++            final ComputeTask<?, ?> task = this.runningTask;
++            return new WatchCatTargetSnapshot(
++                this.targetId,
++                "Compute worker " + this.index,
++                WatchCatTargetKind.COMPUTE_WORKER,
++                current == null ? "" : current.getName(),
++                current == null ? -1L : current.threadId(),
++                current != null && current.isAlive(),
++                task == null ? "idle" : "running",
++                Map.of(
++                    "runningTask", task == null ? "" : Long.toString(task.id),
++                    "queued", Integer.toString(ComputeWorkerPool.this.queuedTasks.get()),
++                    "control", Integer.toString(this.controlTasks.size())
++                )
++            );
++        }
++
++        private CompletableFuture<String> heartbeat(final String payload) {
++            final CompletableFuture<String> future = new CompletableFuture<>();
++            this.controlTasks.offer(new ControlTask(payload, future));
++            return future;
++        }
++
++        private WatchCatRecoveryResult recover(final String reason) {
++            final ComputeTask<?, ?> task = this.runningTask;
++            if (task != null) {
++                ComputeWorkerPool.this.broker.cancelTask(task.id, "WatchCat recovery: " + reason);
++            }
++            final Thread current = this.thread;
++            if (current == null || !current.isAlive()) {
++                return this.restartIfAllowed("Compute worker was already stopped");
++            }
++            current.interrupt();
++            final WatchCatPingResult ping = WatchCat.instance().ping(this.targetId, WatchCatSettings.recoveryWaitMs());
++            if (ping.ok()) {
++                return WatchCatRecoveryResult.interrupted("Compute worker answered after interrupt");
++            }
++            try {
++                current.join(WatchCatSettings.recoveryWaitMs());
++            } catch (final InterruptedException interruptedException) {
++                Thread.currentThread().interrupt();
++                return WatchCatRecoveryResult.escalate("Interrupted while waiting for compute worker recovery");
++            }
++            if (current.isAlive()) {
++                return WatchCatRecoveryResult.escalate("Compute worker did not stop after interrupt. reason=" + reason);
++            }
++            return this.restartIfAllowed("Compute worker restarted after WatchCat recovery");
++        }
++
++        private WatchCatRecoveryResult restartIfAllowed(final String message) {
++            if (ComputeWorkerPool.this.shutdown.get()) {
++                return WatchCatRecoveryResult.interrupted(message + ". pool is shutting down");
++            }
++            this.controlTasks.clear();
++            this.startNewThread();
++            return WatchCatRecoveryResult.restarted(message);
++        }
++
++        private void interrupt() {
++            final Thread current = this.thread;
++            if (current != null) {
++                current.interrupt();
++            }
++        }
++
++        private void join(final long waitMs) throws InterruptedException {
++            final Thread current = this.thread;
++            if (current != null) {
++                current.join(waitMs);
++            }
++        }
++
++        private void unregister() {
++            WatchCat.instance().unregister(this.targetId);
++        }
++    }
++    // FuckTick End
++
++    private record ControlTask(String payload, CompletableFuture<String> future) {
+     }
+ }
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
+index d2249fd67ecd203f5d2d9c173ba6572ba1a371b8..14b553f4595b8c00f92ef395b4175a5bf34ec2f3 100644
+--- a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
++++ b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
+@@ -219,6 +219,17 @@ public final class FuckTickComputeBroker {
+         this.finishTask(task, state, failureMessage);
+     }
+ 
++    // FuckTick Start - отмена задачи по запросу WatchCat
++    boolean cancelTask(final long taskId, final String reason) {
++        final ComputeTask<?, ?> task = this.tasks.get(taskId);
++        if (task == null || task.isTerminal()) {
++            return false;
++        }
++        task.cancellationToken.cancel(reason);
++        return true;
++    }
++    // FuckTick End
++
+     private <R extends ComputeResult> void runApply(final ComputeTask<?, R> task, final R result) {
+         task.applyThread = Thread.currentThread().getName();
+         final long applyStartNanos = System.nanoTime();
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeIoWorkerPool.java b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeIoWorkerPool.java
+index 09b9e9c486f9ca9c3d24f3c69f7e33df7006dbc1..67f08b9fb4478122ce6e796c09f5f85f3f895fdf 100644
+--- a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeIoWorkerPool.java
++++ b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeIoWorkerPool.java
+@@ -2,12 +2,19 @@ package io.papermc.paper.fucktick.compute;
+ 
+ import io.papermc.paper.fucktick.compute.workload.ChunkSavePayloadResult;
+ import io.papermc.paper.fucktick.compute.workload.ChunkSaveWriteResult;
++import io.papermc.paper.fucktick.watchcat.WatchCat;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatTarget;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetKind;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetSnapshot;
+ import java.io.IOException;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.nio.file.StandardCopyOption;
++import java.util.Map;
+ import java.util.Objects;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.ThreadFactory;
+@@ -19,7 +26,9 @@ public final class FuckTickComputeIoWorkerPool {
+ 
+     private static final AtomicReference<FuckTickComputeIoWorkerPool> INSTANCE = new AtomicReference<>();
+ 
+-    private final ExecutorService workers;
++    private final ConcurrentHashMap<String, Thread> workerThreads = new ConcurrentHashMap<>();
++    private final AtomicInteger generations = new AtomicInteger();
++    private volatile ExecutorService workers;
+ 
+     public static FuckTickComputeIoWorkerPool instance() {
+         final FuckTickComputeIoWorkerPool current = INSTANCE.get();
+@@ -42,7 +51,35 @@ public final class FuckTickComputeIoWorkerPool {
+     }
+ 
+     private FuckTickComputeIoWorkerPool() {
+-        this.workers = Executors.newFixedThreadPool(readWorkerCount(), new IoThreadFactory());
++        this.workers = this.createWorkerPool();
++        // FuckTick Start - цель WatchCat для compute IO
++        WatchCat.instance().register(new WatchCatTarget() {
++            @Override
++            public String id() {
++                return "compute-io";
++            }
++
++            @Override
++            public WatchCatTargetSnapshot snapshot() {
++                return FuckTickComputeIoWorkerPool.this.watchCatSnapshot();
++            }
++
++            @Override
++            public CompletableFuture<String> heartbeat(final String payload) {
++                return CompletableFuture.supplyAsync(() -> payload, FuckTickComputeIoWorkerPool.this.workers);
++            }
++
++            @Override
++            public WatchCatRecoveryResult recover(final String reason) {
++                return FuckTickComputeIoWorkerPool.this.recover(reason);
++            }
++
++            @Override
++            public boolean enabled() {
++                return !FuckTickComputeIoWorkerPool.this.workers.isShutdown();
++            }
++        });
++        // FuckTick End
+     }
+ 
+     public CompletableFuture<ChunkSaveWriteResult> writeChunkPayload(final Path target, final ChunkSavePayloadResult payload) {
+@@ -55,13 +92,49 @@ public final class FuckTickComputeIoWorkerPool {
+     }
+ 
+     public void shutdown() {
+-        this.workers.shutdownNow();
++        WatchCat.instance().unregister("compute-io");
++        this.shutdownExecutor(this.workers);
++    }
++
++    // FuckTick Start - восстановление compute IO worker pool
++    private WatchCatTargetSnapshot watchCatSnapshot() {
++        final long alive = this.workerThreads.values().stream().filter(Thread::isAlive).count();
++        return new WatchCatTargetSnapshot(
++            "compute-io",
++            "Compute IO",
++            WatchCatTargetKind.COMPUTE_IO,
++            "",
++            -1L,
++            alive > 0L,
++            this.workers.isShutdown() ? "shutdown" : "running",
++            Map.of(
++                "threads", Long.toString(alive),
++                "generation", Integer.toString(this.generations.get())
++            )
++        );
++    }
++
++    private synchronized WatchCatRecoveryResult recover(final String reason) {
++        final ExecutorService previous = this.workers;
++        this.shutdownExecutor(previous);
++        this.workers = this.createWorkerPool();
++        return WatchCatRecoveryResult.restarted("Compute IO worker pool restarted. reason=" + reason);
++    }
++
++    private ExecutorService createWorkerPool() {
++        final int generation = this.generations.incrementAndGet();
++        return Executors.newFixedThreadPool(readWorkerCount(), new IoThreadFactory(generation));
++    }
++
++    private void shutdownExecutor(final ExecutorService executor) {
++        executor.shutdownNow();
+         try {
+-            this.workers.awaitTermination(readShutdownWaitMs(), TimeUnit.MILLISECONDS);
++            executor.awaitTermination(readShutdownWaitMs(), TimeUnit.MILLISECONDS);
+         } catch (final InterruptedException ex) {
+             Thread.currentThread().interrupt();
+         }
+     }
++    // FuckTick End
+ 
+     private static ChunkSaveWriteResult writePayload(final Path target, final ChunkSavePayloadResult payload) {
+         try {
+@@ -103,14 +176,27 @@ public final class FuckTickComputeIoWorkerPool {
+         }
+     }
+ 
+-    private static final class IoThreadFactory implements ThreadFactory {
++    private final class IoThreadFactory implements ThreadFactory {
+ 
++        private final int generation;
+         private final AtomicInteger ids = new AtomicInteger();
+ 
++        private IoThreadFactory(final int generation) {
++            this.generation = generation;
++        }
++
+         @Override
+         public Thread newThread(final Runnable runnable) {
+-            final Thread thread = new Thread(runnable, "FuckTick Compute IO Worker - " + this.ids.incrementAndGet());
++            final String name = "FuckTick Compute IO Worker - " + this.generation + "-" + this.ids.incrementAndGet();
++            final Thread thread = new Thread(() -> {
++                try {
++                    runnable.run();
++                } finally {
++                    FuckTickComputeIoWorkerPool.this.workerThreads.remove(Thread.currentThread().getName());
++                }
++            }, name);
+             thread.setDaemon(true);
++            FuckTickComputeIoWorkerPool.this.workerThreads.put(name, thread);
+             return thread;
+         }
+     }
+diff --git a/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java b/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
+index 1eb7dc86a73c85d5ce6c748238d1f921b8b8cce1..971b2e56854082ba618e1a20e05413e0966a062c 100644
+--- a/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
++++ b/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
+@@ -7,6 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+ 
++import io.papermc.paper.fucktick.watchcat.WatchCat;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryAction;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryResult;
+ import io.papermc.paper.fucktick.compute.workload.AffectedBlockSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.BlockCollisionComputeSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.ChunkSavePayloadResult;
+@@ -304,6 +307,22 @@ public class FuckTickComputeBrokerTest {
+         assertTrue(broker.snapshot().workers().stream().noneMatch(ComputeWorkerSnapshot::alive));
+     }
+ 
++    @Test
++    void watchCatRecoveryDoesNotDuplicateHealthyComputeWorker() {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            assertEquals(1L, broker.snapshot().workers().stream().filter(ComputeWorkerSnapshot::alive).count());
++
++            final WatchCatRecoveryResult recovery = WatchCat.instance().recover("compute-worker:1", "test recovery");
++
++            assertEquals(WatchCatRecoveryAction.INTERRUPTED, recovery.action());
++            assertEquals(1, broker.snapshot().workers().size());
++            assertEquals(1L, broker.snapshot().workers().stream().filter(ComputeWorkerSnapshot::alive).count());
++        } finally {
++            broker.shutdown();
++        }
++    }
++
+     @Test
+     void typeSpecificBudgetRejectsExcessPathfindingWork() throws Exception {
+         final FuckTickComputeBroker broker = FuckTickComputeBroker.createForTesting(new ComputeBudgetPolicy(

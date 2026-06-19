@@ -1,0 +1,354 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bungeepithub@gmail.com>
+Date: Fri, 19 Jun 2026 14:34:45 +0500
+Subject: [PATCH] Add WatchCat plugin runtime targets
+
+
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+index 3eda84686fe2f42a8ece87b1beda79b049d2d98d..78100a554c3b3fc1d6593b80a780d304cbe7135a 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+@@ -1,5 +1,12 @@
+ package io.papermc.paper.fucktick.plugin;
+ 
++import io.papermc.paper.fucktick.watchcat.WatchCat;
++import io.papermc.paper.fucktick.watchcat.WatchCatPingResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatSettings;
++import io.papermc.paper.fucktick.watchcat.WatchCatTarget;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetKind;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetSnapshot;
+ import io.papermc.paper.plugin.configuration.PluginMeta;
+ import java.util.ArrayList;
+ import java.util.Comparator;
+@@ -12,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.Future;
++import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.logging.Level;
+@@ -32,6 +40,44 @@ public final class PluginFUCKLOADER {
+     });
+ 
+     private PluginFUCKLOADER() {
++        // FuckTick Start - цель WatchCat для управляющего потока плагинов
++        WatchCat.instance().register(new WatchCatTarget() {
++            @Override
++            public String id() {
++                return "plugin-management:PluginFUCKLOADER";
++            }
++
++            @Override
++            public WatchCatTargetSnapshot snapshot() {
++                final Thread thread = PluginFUCKLOADER.this.managementThread.get();
++                return new WatchCatTargetSnapshot(
++                    this.id(),
++                    "PluginFUCKLOADER",
++                    WatchCatTargetKind.PLUGIN_MANAGEMENT,
++                    thread == null ? "" : thread.getName(),
++                    thread == null ? -1L : thread.threadId(),
++                    thread != null && thread.isAlive(),
++                    PluginFUCKLOADER.this.managementExecutor.isShutdown() ? "shutdown" : "running",
++                    Map.of("runtimes", Integer.toString(PluginFUCKLOADER.this.runtimes.size()))
++                );
++            }
++
++            @Override
++            public CompletableFuture<String> heartbeat(final String payload) {
++                return PluginFUCKLOADER.this.managementHeartbeat(payload);
++            }
++
++            @Override
++            public WatchCatRecoveryResult recover(final String reason) {
++                return PluginFUCKLOADER.this.recoverManagementThread(reason);
++            }
++
++            @Override
++            public boolean enabled() {
++                return !PluginFUCKLOADER.this.managementExecutor.isShutdown();
++            }
++        });
++        // FuckTick End
+     }
+ 
+     public static PluginFUCKLOADER instance() {
+@@ -163,6 +209,9 @@ public final class PluginFUCKLOADER {
+         for (final PluginRuntime runtime : copy) {
+             runtime.stopAndJoin(PluginRuntimeSettings.maxDisableDrainTimeMs());
+         }
++        // FuckTick Start - снятие управляющей цели WatchCat
++        WatchCat.instance().unregister("plugin-management:PluginFUCKLOADER");
++        // FuckTick End
+         this.managementExecutor.shutdownNow();
+         try {
+             this.managementExecutor.awaitTermination(5L, TimeUnit.SECONDS);
+@@ -192,6 +241,31 @@ public final class PluginFUCKLOADER {
+         }
+     }
+ 
++    // FuckTick Start - heartbeat и восстановление управляющего потока
++    private CompletableFuture<String> managementHeartbeat(final String payload) {
++        final CompletableFuture<String> heartbeat = new CompletableFuture<>();
++        try {
++            this.managementExecutor.execute(() -> heartbeat.complete(payload));
++        } catch (final RejectedExecutionException rejectedExecutionException) {
++            heartbeat.completeExceptionally(rejectedExecutionException);
++        }
++        return heartbeat;
++    }
++
++    private WatchCatRecoveryResult recoverManagementThread(final String reason) {
++        final Thread thread = this.managementThread.get();
++        if (thread == null || !thread.isAlive()) {
++            return WatchCatRecoveryResult.none("Plugin management thread is not alive");
++        }
++        thread.interrupt();
++        final WatchCatPingResult ping = WatchCat.instance().ping("plugin-management:PluginFUCKLOADER", WatchCatSettings.recoveryWaitMs());
++        if (ping.ok()) {
++            return WatchCatRecoveryResult.interrupted("Plugin management thread answered after interrupt");
++        }
++        return WatchCatRecoveryResult.escalate("Plugin management thread did not answer after interrupt. reason=" + reason);
++    }
++    // FuckTick End
++
+     private void logCompatibilityReport(final Plugin plugin, final PluginRuntime runtime) {
+         final boolean foliaSupported = plugin.getPluginMeta().isFoliaSupported();
+         final PluginRuntimeSnapshot snapshot = runtime.snapshot();
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+index e033d38a6efb57e171600302eb5f4b7a7ded9a29..01e647151e00bee857b95198492c6eeb5bbd99ac 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+@@ -1,8 +1,16 @@
+ package io.papermc.paper.fucktick.plugin;
+ 
++import io.papermc.paper.fucktick.watchcat.WatchCat;
++import io.papermc.paper.fucktick.watchcat.WatchCatPingResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatSettings;
++import io.papermc.paper.fucktick.watchcat.WatchCatTarget;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetKind;
++import io.papermc.paper.fucktick.watchcat.WatchCatTargetSnapshot;
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Locale;
++import java.util.Map;
+ import java.util.concurrent.BlockingQueue;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ExecutionException;
+@@ -20,6 +28,8 @@ final class PluginRuntime {
+     private final Plugin plugin;
+     private final BlockingQueue<PluginTask<?>> lifecycleQueue = new LinkedBlockingQueue<>();
+     private final BlockingQueue<PluginTask<?>> callbackQueue = new LinkedBlockingQueue<>(PluginRuntimeSettings.maxQueuedTasksPerPlugin());
++    private final BlockingQueue<PluginTask<?>> controlQueue = new LinkedBlockingQueue<>();
++    private final String watchCatTargetId;
+     private final AtomicReference<PluginRuntimeState> state = new AtomicReference<>(PluginRuntimeState.CREATED);
+     private final AtomicInteger blockedCallers = new AtomicInteger();
+     private final AtomicInteger resultQueueSize = new AtomicInteger();
+@@ -36,6 +46,36 @@ final class PluginRuntime {
+ 
+     PluginRuntime(final Plugin plugin) {
+         this.plugin = plugin;
++        this.watchCatTargetId = "plugin:" + plugin.getName().toLowerCase(Locale.ROOT);
++        // FuckTick Start - цель WatchCat для потока плагина
++        WatchCat.instance().register(new WatchCatTarget() {
++            @Override
++            public String id() {
++                return PluginRuntime.this.watchCatTargetId;
++            }
++
++            @Override
++            public WatchCatTargetSnapshot snapshot() {
++                return PluginRuntime.this.watchCatSnapshot();
++            }
++
++            @Override
++            public CompletableFuture<String> heartbeat(final String payload) {
++                return PluginRuntime.this.heartbeat(payload);
++            }
++
++            @Override
++            public WatchCatRecoveryResult recover(final String reason) {
++                return PluginRuntime.this.recoverFromWatchCat(reason);
++            }
++
++            @Override
++            public boolean enabled() {
++                final PluginRuntimeState current = PluginRuntime.this.state.get();
++                return PluginRuntime.this.thread != null && current != PluginRuntimeState.DISABLED && current != PluginRuntimeState.TERMINATED;
++            }
++        });
++        // FuckTick End
+     }
+ 
+     Plugin plugin() {
+@@ -88,6 +128,9 @@ final class PluginRuntime {
+ 
+     void markTerminated() {
+         this.state.set(PluginRuntimeState.TERMINATED);
++        // FuckTick Start - снятие цели WatchCat после остановки плагина
++        WatchCat.instance().unregister(this.watchCatTargetId);
++        // FuckTick End
+     }
+ 
+     void markFailed(final Throwable throwable) {
+@@ -220,7 +263,7 @@ final class PluginRuntime {
+ 
+     private void runLoop() {
+         while (true) {
+-            if (this.stopRequested && this.lifecycleQueue.isEmpty() && this.callbackQueue.isEmpty()) {
++            if (this.stopRequested && this.lifecycleQueue.isEmpty() && this.callbackQueue.isEmpty() && this.controlQueue.isEmpty()) {
+                 return;
+             }
+             try {
+@@ -237,6 +280,10 @@ final class PluginRuntime {
+     }
+ 
+     private PluginTask<?> takeTask() throws InterruptedException {
++        final PluginTask<?> controlTask = this.controlQueue.poll();
++        if (controlTask != null) {
++            return controlTask;
++        }
+         final PluginTask<?> lifecycleTask = this.lifecycleQueue.poll();
+         if (lifecycleTask != null) {
+             return lifecycleTask;
+@@ -245,6 +292,10 @@ final class PluginRuntime {
+         if (callbackTask != null) {
+             return callbackTask;
+         }
++        final PluginTask<?> delayedControlTask = this.controlQueue.poll();
++        if (delayedControlTask != null) {
++            return delayedControlTask;
++        }
+         return this.lifecycleQueue.poll();
+     }
+ 
+@@ -272,12 +323,80 @@ final class PluginRuntime {
+     private void cancelQueuedCallbacks(final String reason) {
+         final List<PluginTask<?>> drained = new ArrayList<>();
+         this.callbackQueue.drainTo(drained);
++        this.controlQueue.drainTo(drained);
+         final IllegalStateException exception = new IllegalStateException(reason);
+         for (final PluginTask<?> task : drained) {
+             task.future.completeExceptionally(exception);
+         }
+     }
+ 
++    // FuckTick Start - heartbeat и восстановление потока плагина
++    private WatchCatTargetSnapshot watchCatSnapshot() {
++        final PluginRuntimeSnapshot snapshot = this.snapshot();
++        return new WatchCatTargetSnapshot(
++            this.watchCatTargetId,
++            this.plugin.getName(),
++            WatchCatTargetKind.PLUGIN_RUNTIME,
++            snapshot.threadName(),
++            snapshot.threadId(),
++            this.thread != null && this.thread.isAlive(),
++            snapshot.state().name(),
++            Map.of(
++                "callbacks", Integer.toString(snapshot.queuedTasks()),
++                "lifecycle", Integer.toString(snapshot.lifecycleQueuedTasks()),
++                "control", Integer.toString(this.controlQueue.size()),
++                "runningTask", snapshot.runningTask()
++            )
++        );
++    }
++
++    private CompletableFuture<String> heartbeat(final String payload) {
++        if (Thread.currentThread() == this.thread) {
++            return CompletableFuture.completedFuture(payload);
++        }
++        final CompletableFuture<String> future = new CompletableFuture<>();
++        this.controlQueue.offer(new PluginTask<>("watchcat:heartbeat", false, () -> payload, future));
++        return future;
++    }
++
++    private WatchCatRecoveryResult recoverFromWatchCat(final String reason) {
++        this.cancelQueuedCallbacks("WatchCat recovery: " + reason);
++        final Thread currentThread = this.thread;
++        if (currentThread == null || !currentThread.isAlive()) {
++            return this.restartAfterStoppedThread(currentThread, "Plugin thread was already stopped");
++        }
++        currentThread.interrupt();
++        final WatchCatPingResult ping = WatchCat.instance().ping(this.watchCatTargetId, WatchCatSettings.recoveryWaitMs());
++        if (ping.ok()) {
++            return WatchCatRecoveryResult.interrupted("Plugin thread answered after interrupt");
++        }
++        try {
++            currentThread.join(WatchCatSettings.recoveryWaitMs());
++        } catch (final InterruptedException interruptedException) {
++            Thread.currentThread().interrupt();
++            return WatchCatRecoveryResult.escalate("Interrupted while waiting for plugin thread recovery");
++        }
++        if (currentThread.isAlive()) {
++            return WatchCatRecoveryResult.escalate("Plugin thread did not stop after interrupt. reason=" + reason);
++        }
++        this.cancelQueuedCallbacks("WatchCat restart after stopped plugin thread");
++        return this.restartAfterStoppedThread(currentThread, "Plugin thread restarted after WatchCat recovery");
++    }
++
++    private synchronized WatchCatRecoveryResult restartAfterStoppedThread(final Thread oldThread, final String message) {
++        if (oldThread != null && this.thread == oldThread) {
++            this.thread = null;
++        }
++        final PluginRuntimeState current = this.state.get();
++        if (current == PluginRuntimeState.ENABLING || current == PluginRuntimeState.ENABLED) {
++            this.stopRequested = false;
++            this.start();
++            return WatchCatRecoveryResult.restarted(message);
++        }
++        return WatchCatRecoveryResult.interrupted(message + ". state=" + current);
++    }
++    // FuckTick End
++
+     private void fail(final String label, final Throwable throwable) {
+         this.failure = throwable;
+         this.state.set(PluginRuntimeState.FAILED);
+diff --git a/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+index 8a2005bdac27cbe0949650bf6b119f7195794e25..10b59c0a9d318a1d528b8ee84568ecc04e7bbacd 100644
+--- a/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
++++ b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+@@ -8,8 +8,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.when;
+ 
++import io.papermc.paper.fucktick.watchcat.WatchCat;
++import io.papermc.paper.fucktick.watchcat.WatchCatPingResult;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryAction;
++import io.papermc.paper.fucktick.watchcat.WatchCatRecoveryResult;
+ import io.papermc.paper.plugin.configuration.PluginMeta;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
+@@ -68,6 +73,28 @@ class PluginFUCKLOADERTest {
+         final String commandThread = loader.callPluginBlocking(first, "command:/runtime-test", () -> Thread.currentThread().getName(), 5_000L);
+         assertEquals(firstEnableThread.get(), commandThread);
+ 
++        final WatchCatPingResult pluginPing = WatchCat.instance().ping("plugin:firstruntimeplugin", 5_000L);
++        assertTrue(pluginPing.ok());
++        assertEquals("Meow <3", pluginPing.response());
++        assertEquals(firstEnableThread.get(), loader.snapshot("FirstRuntimePlugin").threadName());
++
++        final CountDownLatch stuckStarted = new CountDownLatch(1);
++        final AtomicBoolean stuckInterrupted = new AtomicBoolean();
++        final CompletableFuture<Void> stuckTask = loader.executePluginTask(first, "test:watchcat-stuck", () -> {
++            stuckStarted.countDown();
++            try {
++                Thread.sleep(30_000L);
++            } catch (final InterruptedException interruptedException) {
++                stuckInterrupted.set(true);
++                Thread.currentThread().interrupt();
++            }
++        });
++        assertTrue(stuckStarted.await(5L, TimeUnit.SECONDS));
++        final WatchCatRecoveryResult recovery = WatchCat.instance().recover("plugin:firstruntimeplugin", "test recovery");
++        assertEquals(WatchCatRecoveryAction.INTERRUPTED, recovery.action());
++        assertTrue(stuckInterrupted.get());
++        stuckTask.get(5L, TimeUnit.SECONDS);
++
+         final AtomicInteger activeCallbacks = new AtomicInteger();
+         final AtomicInteger maxActiveCallbacks = new AtomicInteger();
+         final CompletableFuture<Void> firstTask = loader.executePluginTask(first, "test:first", () -> {

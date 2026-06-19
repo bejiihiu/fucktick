@@ -1,0 +1,13 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatTargetKind.java
+@@ -1,0 +_,10 @@
++package io.papermc.paper.fucktick.watchcat;
++
++public enum WatchCatTargetKind {
++    PLUGIN_MANAGEMENT,
++    PLUGIN_RUNTIME,
++    COMPUTE_WORKER,
++    COMPUTE_IO,
++    SERVER_WATCHDOG,
++    OTHER
++}

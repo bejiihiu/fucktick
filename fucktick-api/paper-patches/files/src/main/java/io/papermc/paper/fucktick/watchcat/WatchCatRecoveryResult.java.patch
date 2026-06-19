@@ -1,0 +1,47 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/watchcat/WatchCatRecoveryResult.java
+@@ -1,0 +_,44 @@
++package io.papermc.paper.fucktick.watchcat;
++
++public record WatchCatRecoveryResult(
++    WatchCatRecoveryAction action,
++    boolean recovered,
++    boolean escalate,
++    String message
++) {
++
++    public WatchCatRecoveryResult {
++        if (action == null) {
++            action = WatchCatRecoveryAction.NONE;
++        }
++        message = message == null ? "" : message;
++    }
++
++    public static WatchCatRecoveryResult none(final String message) {
++        return new WatchCatRecoveryResult(WatchCatRecoveryAction.NONE, true, false, message);
++    }
++
++    public static WatchCatRecoveryResult interrupted(final String message) {
++        return new WatchCatRecoveryResult(WatchCatRecoveryAction.INTERRUPTED, true, false, message);
++    }
++
++    public static WatchCatRecoveryResult restarted(final String message) {
++        return new WatchCatRecoveryResult(WatchCatRecoveryAction.RESTARTED, true, false, message);
++    }
++
++    public static WatchCatRecoveryResult failed(final String message) {
++        return new WatchCatRecoveryResult(WatchCatRecoveryAction.FAILED, false, false, message);
++    }
++
++    public static WatchCatRecoveryResult shutdown(final String message) {
++        return new WatchCatRecoveryResult(WatchCatRecoveryAction.SHUTDOWN, true, false, message);
++    }
++
++    public static WatchCatRecoveryResult escalate(final String message) {
++        return new WatchCatRecoveryResult(WatchCatRecoveryAction.ESCALATE, false, true, message);
++    }
++
++    public static WatchCatRecoveryResult unavailable(final String message) {
++        return new WatchCatRecoveryResult(WatchCatRecoveryAction.UNAVAILABLE, false, false, message);
++    }
++}

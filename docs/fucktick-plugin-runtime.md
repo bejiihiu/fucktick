@@ -253,10 +253,10 @@ The thread id comes from `Thread.currentThread().threadId()`, not from the threa
 Diagnostic commands:
 
 ```text
-/fucktick plugins threads
-/fucktick plugin <name> dump
-/fucktick plugin <name> queue
-/fucktick plugin <name> routing
+/watchcat threads
+/watchcat plugin <name> dump
+/watchcat plugin <name> queue
+/watchcat plugin <name> routing
 ```
 
 These expose runtime state, thread name/id, queue sizes, running task, average and last task duration, blocked callers, and last owner context.
@@ -317,6 +317,6 @@ For this runtime to be considered healthy:
 - region/entity/global schedulers remain owner-context schedulers;
 - unknown events stay owner-only;
 - timeout diagnostics appear instead of silent hangs;
-- `/fucktick plugin <name> dump|queue|routing` reports useful state.
+- `/watchcat plugin <name> dump|queue|routing` reports useful state.
 
 If a Folia-compatible plugin breaks, do not immediately widen legacy scheduler behavior. First find which ownership or startup assumption failed, then add the smallest compatibility rule that preserves Folia's model.
