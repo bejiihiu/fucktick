@@ -1,0 +1,1490 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 03:48:49 +0500
+Subject: [PATCH] Add FuckTick plugin runtime layer
+
+
+diff --git a/src/main/java/com/destroystokyo/paper/utils/PaperPluginLogger.java b/src/main/java/com/destroystokyo/paper/utils/PaperPluginLogger.java
+index c78a359566a11904d2dd41098ced556a91a7fa36..b8e5ad3c79177d4dcab46a687085be9aefb7720c 100644
+--- a/src/main/java/com/destroystokyo/paper/utils/PaperPluginLogger.java
++++ b/src/main/java/com/destroystokyo/paper/utils/PaperPluginLogger.java
+@@ -1,8 +1,10 @@
+ package com.destroystokyo.paper.utils;
+ 
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
+ import java.util.logging.Level;
+ import java.util.logging.LogManager;
++import java.util.logging.LogRecord;
+ import java.util.logging.Logger;
+ import org.bukkit.plugin.PluginDescriptionFile;
+ import org.jspecify.annotations.NullMarked;
+@@ -12,6 +14,7 @@ import org.jspecify.annotations.NullMarked;
+  */
+ @NullMarked
+ public class PaperPluginLogger extends Logger {
++    private final PluginMeta meta;
+ 
+     @Deprecated(forRemoval = true)
+     public static Logger getLogger(final PluginDescriptionFile description) {
+@@ -31,6 +34,15 @@ public class PaperPluginLogger extends Logger {
+ 
+     private PaperPluginLogger(final PluginMeta meta) {
+         super(meta.getLoggerPrefix() != null ? meta.getLoggerPrefix() : meta.getName(), null);
++        this.meta = meta;
++    }
++
++    @Override
++    public void log(final LogRecord record) {
++        // FuckTick Start - префикс логов плагина с контекстом выполнения
++        record.setMessage(PluginFUCKLOADER.instance().formatLoggerMessage(this.meta, record.getMessage()));
++        // FuckTick End
++        super.log(record);
+     }
+ 
+     @Override
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/FuckTickPluginContext.java b/src/main/java/io/papermc/paper/fucktick/plugin/FuckTickPluginContext.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3923c0ebfd6f9fafc8d7d25297055db82cbf18c
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/FuckTickPluginContext.java
+@@ -0,0 +1,64 @@
++package io.papermc.paper.fucktick.plugin;
++
++import org.bukkit.plugin.Plugin;
++
++public final class FuckTickPluginContext {
++
++    private static final ThreadLocal<Context> CURRENT = new ThreadLocal<>();
++
++    private FuckTickPluginContext() {
++    }
++
++    static Scope enter(final PluginRuntime runtime, final String contextName) {
++        final Context previous = CURRENT.get();
++        CURRENT.set(new Context(runtime, contextName));
++        return () -> {
++            if (previous == null) {
++                CURRENT.remove();
++            } else {
++                CURRENT.set(previous);
++            }
++        };
++    }
++
++    static Scope enterManagement() {
++        final Context previous = CURRENT.get();
++        CURRENT.set(new Context(null, "PluginFUCKLOADER"));
++        return () -> {
++            if (previous == null) {
++                CURRENT.remove();
++            } else {
++                CURRENT.set(previous);
++            }
++        };
++    }
++
++    public static Plugin currentPlugin() {
++        final Context context = CURRENT.get();
++        return context == null || context.runtime == null ? null : context.runtime.plugin();
++    }
++
++    public static PluginRuntimeState currentState() {
++        final Context context = CURRENT.get();
++        return context == null || context.runtime == null ? null : context.runtime.state();
++    }
++
++    public static String currentContextName() {
++        final Context context = CURRENT.get();
++        return context == null ? null : context.contextName;
++    }
++
++    static PluginRuntime currentRuntime() {
++        final Context context = CURRENT.get();
++        return context == null ? null : context.runtime;
++    }
++
++    @FunctionalInterface
++    interface Scope extends AutoCloseable {
++        @Override
++        void close();
++    }
++
++    private record Context(PluginRuntime runtime, String contextName) {
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/FuckTickThreadChecks.java b/src/main/java/io/papermc/paper/fucktick/plugin/FuckTickThreadChecks.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..95a615692bb5af6af2d56f6d49b8e94aab26fa5b
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/FuckTickThreadChecks.java
+@@ -0,0 +1,40 @@
++package io.papermc.paper.fucktick.plugin;
++
++import org.bukkit.Bukkit;
++import org.bukkit.Location;
++import org.bukkit.entity.Entity;
++
++public final class FuckTickThreadChecks {
++
++    private FuckTickThreadChecks() {
++    }
++
++    public static boolean isPluginThread() {
++        return FuckTickPluginContext.currentRuntime() != null;
++    }
++
++    public static boolean isGlobalThread() {
++        try {
++            return Bukkit.getServer() != null && Bukkit.isGlobalTickThread();
++        } catch (final Throwable ignored) {
++            return false;
++        }
++    }
++
++    public static boolean isRegionThread() {
++        final String threadName = Thread.currentThread().getName();
++        return threadName.contains("Region") || threadName.contains("region");
++    }
++
++    public static void requireRegionThread(final Location location) {
++        if (location == null || !Bukkit.isOwnedByCurrentRegion(location)) {
++            throw new IllegalStateException("World data must be accessed from the owning region thread. Use RegionScheduler to enter the correct owner context.");
++        }
++    }
++
++    public static void requireEntityThread(final Entity entity) {
++        if (entity == null || !Bukkit.isOwnedByCurrentRegion(entity)) {
++            throw new IllegalStateException("Entity data must be accessed from the owning entity or region thread. Use EntityScheduler to enter the correct owner context.");
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..744e97d7b29b0ad874d998ccd270e8c817af1329
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+@@ -0,0 +1,204 @@
++package io.papermc.paper.fucktick.plugin;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.concurrent.Callable;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.logging.Level;
++import org.bukkit.Bukkit;
++import org.bukkit.plugin.Plugin;
++
++public final class PluginFUCKLOADER {
++
++    private static final PluginFUCKLOADER INSTANCE = new PluginFUCKLOADER();
++
++    private final Map<String, PluginRuntime> runtimes = new ConcurrentHashMap<>();
++    private final AtomicReference<Thread> managementThread = new AtomicReference<>();
++    private final ExecutorService managementExecutor = Executors.newSingleThreadExecutor(runnable -> {
++        final Thread thread = new Thread(runnable, "PluginFUCKLOADER");
++        thread.setDaemon(false);
++        INSTANCE.managementThread.set(thread);
++        return thread;
++    });
++
++    private PluginFUCKLOADER() {
++    }
++
++    public static PluginFUCKLOADER instance() {
++        return INSTANCE;
++    }
++
++    public PluginRuntimeSnapshot registerPlugin(final Plugin plugin) {
++        return this.runtime(plugin).snapshot();
++    }
++
++    public void loadPlugin(final Plugin plugin, final Runnable loadAction) throws Throwable {
++        final PluginRuntime runtime = this.runtime(plugin);
++        runtime.markLoading();
++        try {
++            this.callOnManagement(() -> {
++                try (FuckTickPluginContext.Scope ignored = FuckTickPluginContext.enterManagement()) {
++                    loadAction.run();
++                    return null;
++                }
++            });
++            runtime.markLoaded();
++        } catch (final Throwable throwable) {
++            runtime.markFailed(throwable);
++            throw throwable;
++        }
++    }
++
++    public void enablePlugin(final Plugin plugin, final Runnable enableAction) throws Throwable {
++        final PluginRuntime runtime = this.runtime(plugin);
++        runtime.start();
++        runtime.markEnabling();
++        try {
++            runtime.callLifecycle("enable:" + plugin.getName(), () -> {
++                enableAction.run();
++                return null;
++            }, PluginRuntimeSettings.maxPluginCallbackTimeMs());
++            runtime.markEnabled();
++            this.logCompatibilityReport(plugin, runtime);
++        } catch (final Throwable throwable) {
++            runtime.markFailed(throwable);
++            throw throwable;
++        }
++    }
++
++    public void disablePlugin(final Plugin plugin, final Runnable disableAction) throws Throwable {
++        final PluginRuntime runtime = this.runtimes.get(key(plugin.getName()));
++        if (runtime == null) {
++            disableAction.run();
++            return;
++        }
++        runtime.markDraining();
++        runtime.markDisabling();
++        try {
++            runtime.callLifecycle("disable:" + plugin.getName(), () -> {
++                disableAction.run();
++                return null;
++            }, PluginRuntimeSettings.maxDisableDrainTimeMs());
++            runtime.markDisabled();
++        } catch (final Throwable throwable) {
++            runtime.markFailed(throwable);
++            throw throwable;
++        } finally {
++            runtime.stopAndJoin(PluginRuntimeSettings.maxDisableDrainTimeMs());
++        }
++    }
++
++    public CompletableFuture<Void> executePluginTask(final Plugin plugin, final String label, final Runnable runnable) {
++        final PluginRuntime runtime = this.runtime(plugin);
++        runtime.start();
++        return runtime.executeCallback(label, runnable::run);
++    }
++
++    public <T> T callPluginBlocking(final Plugin plugin, final String label, final Callable<T> callable, final long timeoutMs) throws Throwable {
++        final PluginRuntime runtime = this.runtime(plugin);
++        runtime.start();
++        return runtime.callCallback(label, callable::call, timeoutMs);
++    }
++
++    public List<PluginRuntimeSnapshot> snapshots() {
++        return this.runtimes.values().stream()
++            .map(PluginRuntime::snapshot)
++            .sorted(Comparator.comparing(PluginRuntimeSnapshot::pluginName, String.CASE_INSENSITIVE_ORDER))
++            .toList();
++    }
++
++    public PluginRuntimeSnapshot snapshot(final String pluginName) {
++        final PluginRuntime runtime = this.runtimes.get(key(pluginName));
++        return runtime == null ? null : runtime.snapshot();
++    }
++
++    public Throwable failure(final String pluginName) {
++        final PluginRuntime runtime = this.runtimes.get(key(pluginName));
++        return runtime == null ? null : runtime.failure();
++    }
++
++    public String loggerContext() {
++        final String contextName = FuckTickPluginContext.currentContextName();
++        if (contextName != null) {
++            return contextName;
++        }
++        if (Thread.currentThread() == this.managementThread.get()) {
++            return "PluginFUCKLOADER";
++        }
++        if (FuckTickThreadChecks.isGlobalThread()) {
++            return "global-owner";
++        }
++        if (FuckTickThreadChecks.isRegionThread()) {
++            return "region-owner";
++        }
++        return "async";
++    }
++
++    public String formatLoggerMessage(final PluginMeta meta, final String message) {
++        final String pluginName = meta.getName();
++        final long threadId = Thread.currentThread().threadId();
++        return "[plugin:" + pluginName + "] [tid:" + threadId + "] [ctx:" + this.loggerContext() + "] " + (message == null ? "" : message);
++    }
++
++    public void shutdown() {
++        final List<PluginRuntime> copy = new ArrayList<>(this.runtimes.values());
++        for (final PluginRuntime runtime : copy) {
++            runtime.stopAndJoin(PluginRuntimeSettings.maxDisableDrainTimeMs());
++        }
++        this.managementExecutor.shutdownNow();
++        try {
++            this.managementExecutor.awaitTermination(5L, TimeUnit.SECONDS);
++        } catch (final InterruptedException interruptedException) {
++            Thread.currentThread().interrupt();
++        }
++    }
++
++    private PluginRuntime runtime(final Plugin plugin) {
++        return this.runtimes.computeIfAbsent(key(plugin.getName()), ignored -> new PluginRuntime(plugin));
++    }
++
++    private <T> T callOnManagement(final Callable<T> callable) throws Throwable {
++        if (Thread.currentThread() == this.managementThread.get()) {
++            return callable.call();
++        }
++        final Future<T> future = this.managementExecutor.submit(callable);
++        try {
++            return future.get(PluginRuntimeSettings.maxPluginCallbackTimeMs(), TimeUnit.MILLISECONDS);
++        } catch (final java.util.concurrent.ExecutionException executionException) {
++            throw executionException.getCause();
++        }
++    }
++
++    private void logCompatibilityReport(final Plugin plugin, final PluginRuntime runtime) {
++        final boolean foliaSupported = plugin.getPluginMeta().isFoliaSupported();
++        final PluginRuntimeSnapshot snapshot = runtime.snapshot();
++        plugin.getLogger().info(
++            "Plugin compatibility report:"
++                + " plugin=" + plugin.getName()
++                + " folia-supported=" + foliaSupported
++                + " uses-plugin-thread=true"
++                + " commands=offloaded"
++                + " tab-complete=offloaded"
++                + " asyncScheduler=plugin-thread"
++                + " regionScheduler=owner-thread"
++                + " entityScheduler=owner-thread"
++                + " globalScheduler=owner-thread"
++                + " state=" + snapshot.state()
++                + " threadId=" + snapshot.threadId()
++        );
++    }
++
++    private static String key(final String pluginName) {
++        return pluginName.toLowerCase(Locale.ROOT);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..48640bcb03866241aa863c16062197b02937fd30
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+@@ -0,0 +1,296 @@
++package io.papermc.paper.fucktick.plugin;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicLong;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.logging.Level;
++import org.bukkit.plugin.Plugin;
++
++final class PluginRuntime {
++
++    private final Plugin plugin;
++    private final BlockingQueue<PluginTask<?>> lifecycleQueue = new LinkedBlockingQueue<>();
++    private final BlockingQueue<PluginTask<?>> callbackQueue = new LinkedBlockingQueue<>(PluginRuntimeSettings.maxQueuedTasksPerPlugin());
++    private final AtomicReference<PluginRuntimeState> state = new AtomicReference<>(PluginRuntimeState.CREATED);
++    private final AtomicInteger blockedCallers = new AtomicInteger();
++    private final AtomicInteger resultQueueSize = new AtomicInteger();
++    private final AtomicLong completedTasks = new AtomicLong();
++    private final AtomicLong totalTaskDurationNs = new AtomicLong();
++
++    private volatile Thread thread;
++    private volatile boolean stopRequested;
++    private volatile String runningTask;
++    private volatile long runningTaskStartNs;
++    private volatile long lastTaskDurationNs;
++    private volatile String lastOwnerContext = "unknown";
++    private volatile Throwable failure;
++
++    PluginRuntime(final Plugin plugin) {
++        this.plugin = plugin;
++    }
++
++    Plugin plugin() {
++        return this.plugin;
++    }
++
++    PluginRuntimeState state() {
++        return this.state.get();
++    }
++
++    synchronized void start() {
++        if (this.thread != null) {
++            return;
++        }
++        final Thread created = new Thread(this::runLoop, "FuckTick Plugin Thread - " + this.plugin.getName());
++        created.setDaemon(false);
++        created.setUncaughtExceptionHandler((thread, throwable) -> this.fail("uncaught-exception", throwable));
++        this.thread = created;
++        created.start();
++    }
++
++    void markLoading() {
++        this.state.set(PluginRuntimeState.LOADING);
++    }
++
++    void markLoaded() {
++        this.state.set(PluginRuntimeState.LOADED);
++    }
++
++    void markEnabling() {
++        this.state.set(PluginRuntimeState.ENABLING);
++    }
++
++    void markEnabled() {
++        this.state.set(PluginRuntimeState.ENABLED);
++    }
++
++    void markDraining() {
++        this.state.set(PluginRuntimeState.DRAINING);
++        this.cancelQueuedCallbacks("plugin runtime is draining");
++    }
++
++    void markDisabling() {
++        this.state.set(PluginRuntimeState.DISABLING);
++    }
++
++    void markDisabled() {
++        this.state.set(PluginRuntimeState.DISABLED);
++    }
++
++    void markTerminated() {
++        this.state.set(PluginRuntimeState.TERMINATED);
++    }
++
++    void markFailed(final Throwable throwable) {
++        this.failure = throwable;
++        this.state.set(PluginRuntimeState.FAILED);
++        this.cancelQueuedCallbacks("plugin runtime failed");
++    }
++
++    <T> T callLifecycle(final String label, final ThrowingSupplier<T> supplier, final long timeoutMs) throws Throwable {
++        return this.callBlocking(label, true, supplier, timeoutMs);
++    }
++
++    <T> T callCallback(final String label, final ThrowingSupplier<T> supplier, final long timeoutMs) throws Throwable {
++        return this.callBlocking(label, false, supplier, timeoutMs);
++    }
++
++    CompletableFuture<Void> executeCallback(final String label, final ThrowingRunnable runnable) {
++        final CompletableFuture<Void> future = new CompletableFuture<>();
++        final PluginRuntimeState currentState = this.state.get();
++        if (currentState != PluginRuntimeState.ENABLING && currentState != PluginRuntimeState.ENABLED) {
++            future.completeExceptionally(new IllegalStateException("Plugin " + this.plugin.getName() + " is not accepting callbacks in state " + currentState));
++            return future;
++        }
++        final PluginTask<Void> task = new PluginTask<>(label, false, () -> {
++            runnable.run();
++            return null;
++        }, future);
++        if (!this.callbackQueue.offer(task)) {
++            final String message = "Plugin " + this.plugin.getName() + " exceeded max queued tasks. queued=" + this.callbackQueue.size() + " limit=" + PluginRuntimeSettings.maxQueuedTasksPerPlugin();
++            this.plugin.getLogger().warning(message);
++            future.completeExceptionally(new IllegalStateException(message));
++        }
++        return future;
++    }
++
++    void stopAndJoin(final long timeoutMs) {
++        this.stopRequested = true;
++        final Thread currentThread = this.thread;
++        if (currentThread == null) {
++            this.markTerminated();
++            return;
++        }
++        currentThread.interrupt();
++        try {
++            currentThread.join(Math.max(1L, timeoutMs));
++        } catch (final InterruptedException interruptedException) {
++            Thread.currentThread().interrupt();
++        }
++        if (currentThread.isAlive()) {
++            this.plugin.getLogger().warning("Plugin thread did not stop in time: plugin=" + this.plugin.getName() + " thread=" + currentThread.getName());
++        } else {
++            this.markTerminated();
++        }
++    }
++
++    PluginRuntimeSnapshot snapshot() {
++        final Thread currentThread = this.thread;
++        final long now = System.nanoTime();
++        final long runningDuration = this.runningTaskStartNs == 0L ? 0L : TimeUnit.NANOSECONDS.toMillis(now - this.runningTaskStartNs);
++        final long completed = this.completedTasks.get();
++        final long average = completed == 0L ? 0L : TimeUnit.NANOSECONDS.toMillis(this.totalTaskDurationNs.get() / completed);
++        return new PluginRuntimeSnapshot(
++            this.plugin.getName(),
++            this.state.get(),
++            currentThread == null ? "" : currentThread.getName(),
++            currentThread == null ? -1L : currentThread.threadId(),
++            this.callbackQueue.size(),
++            this.lifecycleQueue.size(),
++            this.resultQueueSize.get(),
++            this.runningTask == null ? "" : this.runningTask,
++            runningDuration,
++            TimeUnit.NANOSECONDS.toMillis(this.lastTaskDurationNs),
++            average,
++            this.blockedCallers.get(),
++            this.lastOwnerContext
++        );
++    }
++
++    Throwable failure() {
++        return this.failure;
++    }
++
++    private <T> T callBlocking(final String label, final boolean lifecycle, final ThrowingSupplier<T> supplier, final long timeoutMs) throws Throwable {
++        if (Thread.currentThread() == this.thread) {
++            return supplier.get();
++        }
++        final CompletableFuture<T> future = new CompletableFuture<>();
++        final PluginTask<T> task = new PluginTask<>(label, lifecycle, supplier, future);
++        if (lifecycle) {
++            this.lifecycleQueue.offer(task);
++        } else if (!this.callbackQueue.offer(task)) {
++            throw new IllegalStateException("Plugin " + this.plugin.getName() + " exceeded max queued tasks. queued=" + this.callbackQueue.size() + " limit=" + PluginRuntimeSettings.maxQueuedTasksPerPlugin());
++        }
++
++        this.blockedCallers.incrementAndGet();
++        this.resultQueueSize.incrementAndGet();
++        this.lastOwnerContext = Thread.currentThread().getName();
++        try {
++            return future.get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
++        } catch (final TimeoutException timeoutException) {
++            future.cancel(false);
++            this.logTimeout(label, timeoutMs);
++            throw timeoutException;
++        } catch (final ExecutionException executionException) {
++            throw executionException.getCause();
++        } finally {
++            this.blockedCallers.decrementAndGet();
++            this.resultQueueSize.decrementAndGet();
++        }
++    }
++
++    private void runLoop() {
++        while (true) {
++            if (this.stopRequested && this.lifecycleQueue.isEmpty() && this.callbackQueue.isEmpty()) {
++                return;
++            }
++            try {
++                final PluginTask<?> task = this.takeTask();
++                if (task == null) {
++                    continue;
++                }
++                this.executeTask(task);
++            } catch (final InterruptedException ignored) {
++            } catch (final Throwable throwable) {
++                this.fail("plugin-thread", throwable);
++            }
++        }
++    }
++
++    private PluginTask<?> takeTask() throws InterruptedException {
++        final PluginTask<?> lifecycleTask = this.lifecycleQueue.poll();
++        if (lifecycleTask != null) {
++            return lifecycleTask;
++        }
++        final PluginTask<?> callbackTask = this.callbackQueue.poll(250L, TimeUnit.MILLISECONDS);
++        if (callbackTask != null) {
++            return callbackTask;
++        }
++        return this.lifecycleQueue.poll();
++    }
++
++    private <T> void executeTask(final PluginTask<T> task) {
++        if (task.future.isCancelled()) {
++            return;
++        }
++        this.runningTask = task.label;
++        this.runningTaskStartNs = System.nanoTime();
++        try (FuckTickPluginContext.Scope ignored = FuckTickPluginContext.enter(this, task.lifecycle ? "plugin-lifecycle" : "plugin-thread")) {
++            final T result = task.supplier.get();
++            task.future.complete(result);
++        } catch (final Throwable throwable) {
++            task.future.completeExceptionally(throwable);
++        } finally {
++            final long duration = System.nanoTime() - this.runningTaskStartNs;
++            this.lastTaskDurationNs = duration;
++            this.totalTaskDurationNs.addAndGet(duration);
++            this.completedTasks.incrementAndGet();
++            this.runningTask = null;
++            this.runningTaskStartNs = 0L;
++        }
++    }
++
++    private void cancelQueuedCallbacks(final String reason) {
++        final List<PluginTask<?>> drained = new ArrayList<>();
++        this.callbackQueue.drainTo(drained);
++        final IllegalStateException exception = new IllegalStateException(reason);
++        for (final PluginTask<?> task : drained) {
++            task.future.completeExceptionally(exception);
++        }
++    }
++
++    private void fail(final String label, final Throwable throwable) {
++        this.failure = throwable;
++        this.state.set(PluginRuntimeState.FAILED);
++        this.plugin.getLogger().log(Level.SEVERE, "Plugin " + this.plugin.getName() + " crashed on its plugin-owned thread. label=" + label, throwable);
++        this.cancelQueuedCallbacks("plugin runtime failed");
++    }
++
++    private void logTimeout(final String label, final long timeoutMs) {
++        final Thread pluginThread = this.thread;
++        final String pluginThreadName = pluginThread == null ? "<not-started>" : pluginThread.getName();
++        final long pluginThreadId = pluginThread == null ? -1L : pluginThread.threadId();
++        this.plugin.getLogger().warning(
++            "Plugin callback timeout: plugin=" + this.plugin.getName()
++                + " callback=" + label
++                + " callerThread=" + Thread.currentThread().getName()
++                + " pluginThread=" + pluginThreadName
++                + " pluginThreadId=" + pluginThreadId
++                + " waited=" + timeoutMs + "ms"
++                + " possibleDeadlock=true"
++        );
++    }
++
++    @FunctionalInterface
++    interface ThrowingRunnable {
++        void run() throws Throwable;
++    }
++
++    @FunctionalInterface
++    interface ThrowingSupplier<T> {
++        T get() throws Throwable;
++    }
++
++    private record PluginTask<T>(String label, boolean lifecycle, ThrowingSupplier<T> supplier, CompletableFuture<T> future) {
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSettings.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSettings.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb0be6bfe960aa4c7201e99d136df6632ad69645
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSettings.java
+@@ -0,0 +1,55 @@
++package io.papermc.paper.fucktick.plugin;
++
++public final class PluginRuntimeSettings {
++
++    private PluginRuntimeSettings() {
++    }
++
++    public static int maxQueuedTasksPerPlugin() {
++        return readInt("fucktick.plugin.maxQueuedTasksPerPlugin", 10_000);
++    }
++
++    public static int maxQueuedResultsPerPlugin() {
++        return readInt("fucktick.plugin.maxQueuedResultsPerPlugin", 1_024);
++    }
++
++    public static long maxBlockingCommandTimeMs() {
++        return readLong("fucktick.plugin.maxBlockingCommandTimeMs", 5_000L);
++    }
++
++    public static long maxBlockingTabCompleteTimeMs() {
++        return readLong("fucktick.plugin.maxBlockingTabCompleteTimeMs", 5_000L);
++    }
++
++    public static long maxDisableDrainTimeMs() {
++        return readLong("fucktick.plugin.maxDisableDrainTimeMs", 10_000L);
++    }
++
++    public static long maxPluginCallbackTimeMs() {
++        return readLong("fucktick.plugin.maxPluginCallbackTimeMs", 10_000L);
++    }
++
++    private static int readInt(final String key, final int fallback) {
++        final String value = System.getProperty(key);
++        if (value == null) {
++            return fallback;
++        }
++        try {
++            return Math.max(1, Integer.parseInt(value));
++        } catch (final NumberFormatException ignored) {
++            return fallback;
++        }
++    }
++
++    private static long readLong(final String key, final long fallback) {
++        final String value = System.getProperty(key);
++        if (value == null) {
++            return fallback;
++        }
++        try {
++            return Math.max(1L, Long.parseLong(value));
++        } catch (final NumberFormatException ignored) {
++            return fallback;
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSnapshot.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6b7cc79aa437554942ddfe31ac35ac7d26cc9b1
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSnapshot.java
+@@ -0,0 +1,18 @@
++package io.papermc.paper.fucktick.plugin;
++
++public record PluginRuntimeSnapshot(
++    String pluginName,
++    PluginRuntimeState state,
++    String threadName,
++    long threadId,
++    int queuedTasks,
++    int lifecycleQueuedTasks,
++    int resultQueueSize,
++    String runningTask,
++    long runningTaskDurationMs,
++    long lastTaskDurationMs,
++    long averageTaskDurationMs,
++    int blockedCallers,
++    String lastOwnerContext
++) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeState.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeState.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d013395bb066aeb0f2c8ed038c34c26a9b00c273
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeState.java
+@@ -0,0 +1,14 @@
++package io.papermc.paper.fucktick.plugin;
++
++public enum PluginRuntimeState {
++    CREATED,
++    LOADING,
++    LOADED,
++    ENABLING,
++    ENABLED,
++    DRAINING,
++    DISABLING,
++    DISABLED,
++    FAILED,
++    TERMINATED
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/CancelEventEffect.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/CancelEventEffect.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc9d601f88c1e7a1d2630b282a880ff6e29714e1
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/CancelEventEffect.java
+@@ -0,0 +1,6 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import org.bukkit.event.Cancellable;
++
++public record CancelEventEffect(Cancellable event, boolean cancelled) implements PluginEffect {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/CancelEventEffectApplier.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/CancelEventEffectApplier.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2788d714e193bdd57f88b7d069ccb71f64c14a7
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/CancelEventEffectApplier.java
+@@ -0,0 +1,14 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++final class CancelEventEffectApplier implements PluginEffectApplier<CancelEventEffect> {
++
++    @Override
++    public boolean supports(final Class<? extends PluginEffect> effectClass) {
++        return CancelEventEffect.class.isAssignableFrom(effectClass);
++    }
++
++    @Override
++    public void apply(final CancelEventEffect effect) {
++        effect.event().setCancelled(effect.cancelled());
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffect.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffect.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e15765382551198c6054fa7e2151d8725ec6ff76
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffect.java
+@@ -0,0 +1,9 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++public sealed interface PluginEffect permits
++    SendMessageEffect,
++    RunRegionEffect,
++    RunGlobalEffect,
++    RunEntityEffect,
++    CancelEventEffect {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectApplier.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectApplier.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..19cb32582bf1ddfcef3c67c2771eb3d8b36f30db
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectApplier.java
+@@ -0,0 +1,8 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++public interface PluginEffectApplier<E extends PluginEffect> {
++
++    boolean supports(Class<? extends PluginEffect> effectClass);
++
++    void apply(E effect);
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectApplierRegistry.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectApplierRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..50e31eaa8f3054eb4febe85b2f781eef9c45d41e
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectApplierRegistry.java
+@@ -0,0 +1,39 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import java.util.ArrayList;
++import java.util.List;
++
++public final class PluginEffectApplierRegistry {
++
++    private static final List<PluginEffectApplier<? extends PluginEffect>> APPLIERS = new ArrayList<>();
++
++    static {
++        register(new SendMessageEffectApplier());
++        register(new RunRegionEffectApplier());
++        register(new RunGlobalEffectApplier());
++        register(new RunEntityEffectApplier());
++        register(new CancelEventEffectApplier());
++    }
++
++    private PluginEffectApplierRegistry() {
++    }
++
++    public static void register(final PluginEffectApplier<? extends PluginEffect> applier) {
++        APPLIERS.add(applier);
++    }
++
++    public static void apply(final PluginEffect effect) {
++        for (final PluginEffectApplier<? extends PluginEffect> applier : APPLIERS) {
++            if (applier.supports(effect.getClass())) {
++                apply(applier, effect);
++                return;
++            }
++        }
++        throw new IllegalArgumentException("No FuckTick effect applier registered for " + effect.getClass().getName());
++    }
++
++    @SuppressWarnings({"unchecked", "rawtypes"})
++    private static void apply(final PluginEffectApplier applier, final PluginEffect effect) {
++        applier.apply(effect);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectDispatcher.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectDispatcher.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..455ff2a7f24c9dcd08968e1287940e3d5bbe2be9
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/PluginEffectDispatcher.java
+@@ -0,0 +1,8 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++public final class PluginEffectDispatcher {
++
++    public void dispatch(final PluginEffect effect) {
++        PluginEffectApplierRegistry.apply(effect);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunEntityEffect.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunEntityEffect.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4eeb889ca63b0312b7ddb3a73dac969dff111a53
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunEntityEffect.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import org.bukkit.entity.Entity;
++import org.bukkit.plugin.Plugin;
++
++public record RunEntityEffect(Plugin plugin, Entity entity, Runnable runnable, Runnable retired) implements PluginEffect {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunEntityEffectApplier.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunEntityEffectApplier.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee9778b6394c35fb942ad18a6e616db54dd779c8
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunEntityEffectApplier.java
+@@ -0,0 +1,14 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++final class RunEntityEffectApplier implements PluginEffectApplier<RunEntityEffect> {
++
++    @Override
++    public boolean supports(final Class<? extends PluginEffect> effectClass) {
++        return RunEntityEffect.class.isAssignableFrom(effectClass);
++    }
++
++    @Override
++    public void apply(final RunEntityEffect effect) {
++        effect.entity().getScheduler().execute(effect.plugin(), effect.runnable(), effect.retired(), 1L);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunGlobalEffect.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunGlobalEffect.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5b0edb859e8c93229608108097dffe4a5d5bbbc
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunGlobalEffect.java
+@@ -0,0 +1,6 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import org.bukkit.plugin.Plugin;
++
++public record RunGlobalEffect(Plugin plugin, Runnable runnable) implements PluginEffect {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunGlobalEffectApplier.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunGlobalEffectApplier.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..02eb7e97f0646ba4e9994e894eb660b940355af8
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunGlobalEffectApplier.java
+@@ -0,0 +1,16 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import org.bukkit.Bukkit;
++
++final class RunGlobalEffectApplier implements PluginEffectApplier<RunGlobalEffect> {
++
++    @Override
++    public boolean supports(final Class<? extends PluginEffect> effectClass) {
++        return RunGlobalEffect.class.isAssignableFrom(effectClass);
++    }
++
++    @Override
++    public void apply(final RunGlobalEffect effect) {
++        Bukkit.getGlobalRegionScheduler().execute(effect.plugin(), effect.runnable());
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunRegionEffect.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunRegionEffect.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c499f427148764867fa8e5ff9b82db7ca1fa5df
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunRegionEffect.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import org.bukkit.Location;
++import org.bukkit.plugin.Plugin;
++
++public record RunRegionEffect(Plugin plugin, Location location, Runnable runnable) implements PluginEffect {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunRegionEffectApplier.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunRegionEffectApplier.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e55285726c7d8a3bc1fc6adb3e7984228308291a
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/RunRegionEffectApplier.java
+@@ -0,0 +1,16 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import org.bukkit.Bukkit;
++
++final class RunRegionEffectApplier implements PluginEffectApplier<RunRegionEffect> {
++
++    @Override
++    public boolean supports(final Class<? extends PluginEffect> effectClass) {
++        return RunRegionEffect.class.isAssignableFrom(effectClass);
++    }
++
++    @Override
++    public void apply(final RunRegionEffect effect) {
++        Bukkit.getRegionScheduler().execute(effect.plugin(), effect.location(), effect.runnable());
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/SendMessageEffect.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/SendMessageEffect.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3669db5de5a876dd8c8ebc3112844e28de2f80d
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/SendMessageEffect.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++import net.kyori.adventure.audience.Audience;
++import net.kyori.adventure.text.Component;
++
++public record SendMessageEffect(Audience audience, Component message) implements PluginEffect {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/effect/SendMessageEffectApplier.java b/src/main/java/io/papermc/paper/fucktick/plugin/effect/SendMessageEffectApplier.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..22c78bb53d8dc2c5cf2e0a8bb16bf1b435ed8a54
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/effect/SendMessageEffectApplier.java
+@@ -0,0 +1,14 @@
++package io.papermc.paper.fucktick.plugin.effect;
++
++final class SendMessageEffectApplier implements PluginEffectApplier<SendMessageEffect> {
++
++    @Override
++    public boolean supports(final Class<? extends PluginEffect> effectClass) {
++        return SendMessageEffect.class.isAssignableFrom(effectClass);
++    }
++
++    @Override
++    public void apply(final SendMessageEffect effect) {
++        effect.audience().sendMessage(effect.message());
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/ConservativeRoutingPolicy.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/ConservativeRoutingPolicy.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2efcd5cf070c277993ed97a35583d2f2f8e5e3d1
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/ConservativeRoutingPolicy.java
+@@ -0,0 +1,21 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import org.bukkit.event.Event;
++
++public final class ConservativeRoutingPolicy implements RoutingPolicy {
++
++    public static final ConservativeRoutingPolicy INSTANCE = new ConservativeRoutingPolicy();
++
++    private ConservativeRoutingPolicy() {
++    }
++
++    @Override
++    public RoutingPlan plan(final Event event, final RoutingMetadata metadata) {
++        return switch (metadata.risk()) {
++            case PLUGIN_LOCAL -> event.isAsynchronous()
++                ? new RoutingPlan(RoutingPlanType.ASYNC_PLUGIN, metadata)
++                : RoutingPlan.ownerOnly(metadata);
++            case GLOBAL_SAFE, RESULT_REQUIRED, PLUGIN_COMPUTE_THEN_OWNER_APPLY, OWNER_BOUND, UNKNOWN_OWNER_BOUND -> RoutingPlan.ownerOnly(metadata);
++        };
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventContextExtractor.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventContextExtractor.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad267b78ab43bf192c5518f2c920dc23f484c4a5
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventContextExtractor.java
+@@ -0,0 +1,10 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import org.bukkit.event.Event;
++
++public interface EventContextExtractor<E extends Event> {
++
++    boolean supports(Class<? extends Event> eventClass);
++
++    RoutingMetadata extract(E event);
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventOwnership.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventOwnership.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..60dada40f4c4d684c2f76415ae2378b92369ea03
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventOwnership.java
+@@ -0,0 +1,9 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++public enum EventOwnership {
++    NONE,
++    GLOBAL,
++    REGION,
++    ENTITY,
++    UNKNOWN
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRisk.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRisk.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6468f308dd73b2a551fbe28baac3d14b638d9018
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRisk.java
+@@ -0,0 +1,10 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++public enum EventRisk {
++    PLUGIN_LOCAL,
++    GLOBAL_SAFE,
++    RESULT_REQUIRED,
++    PLUGIN_COMPUTE_THEN_OWNER_APPLY,
++    OWNER_BOUND,
++    UNKNOWN_OWNER_BOUND
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRoutingRegistry.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRoutingRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8819fc60c021e0a0c036ced3bb3a419203d6fc3
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRoutingRegistry.java
+@@ -0,0 +1,46 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import java.util.ArrayList;
++import java.util.List;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++
++public final class EventRoutingRegistry {
++
++    private static final List<EventContextExtractor<? extends Event>> EXTRACTORS = new ArrayList<>();
++    private static volatile RoutingPolicy routingPolicy = ConservativeRoutingPolicy.INSTANCE;
++
++    static {
++        register(new GeneratedFuckTickEventRoutingTable());
++    }
++
++    private EventRoutingRegistry() {
++    }
++
++    public static void register(final EventContextExtractor<? extends Event> extractor) {
++        EXTRACTORS.add(extractor);
++    }
++
++    public static RoutingPlan plan(final Event event) {
++        final RoutingMetadata metadata = metadata(event);
++        return routingPolicy.plan(event, metadata);
++    }
++
++    public static RoutingMetadata metadata(final Event event) {
++        for (final EventContextExtractor<? extends Event> extractor : EXTRACTORS) {
++            if (extractor.supports(event.getClass())) {
++                return extract(extractor, event);
++            }
++        }
++        return RoutingMetadata.unknown(event instanceof Cancellable);
++    }
++
++    public static void policy(final RoutingPolicy policy) {
++        routingPolicy = policy;
++    }
++
++    @SuppressWarnings({"unchecked", "rawtypes"})
++    private static RoutingMetadata extract(final EventContextExtractor extractor, final Event event) {
++        return extractor.extract(event);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/GeneratedFuckTickEventRoutingTable.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/GeneratedFuckTickEventRoutingTable.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8db83e769210c30c1582771992707c7c0c67c68
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/GeneratedFuckTickEventRoutingTable.java
+@@ -0,0 +1,54 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import org.bukkit.Location;
++import org.bukkit.entity.Entity;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++
++public final class GeneratedFuckTickEventRoutingTable implements EventContextExtractor<Event> {
++
++    @Override
++    public boolean supports(final Class<? extends Event> eventClass) {
++        return true;
++    }
++
++    @Override
++    public RoutingMetadata extract(final Event event) {
++        final String name = event.getClass().getName();
++        final boolean cancellable = event instanceof Cancellable;
++        if (event.isAsynchronous() && (name.contains(".server.") || name.contains(".player.Async"))) {
++            return new RoutingMetadata(EventRisk.PLUGIN_LOCAL, EventOwnership.NONE, false, cancellable, false, false, name.contains(".player."), null, null, null, "async plugin callback");
++        }
++        if (name.contains(".block.")) {
++            return new RoutingMetadata(EventRisk.OWNER_BOUND, EventOwnership.REGION, false, cancellable, true, false, false, null, null, extractLocation(event), "block event");
++        }
++        if (name.contains(".entity.")) {
++            return new RoutingMetadata(EventRisk.OWNER_BOUND, EventOwnership.ENTITY, false, cancellable, false, true, false, null, extractEntity(event), null, "entity event");
++        }
++        if (name.contains(".world.") || name.contains(".chunk.")) {
++            return new RoutingMetadata(EventRisk.OWNER_BOUND, EventOwnership.REGION, false, cancellable, true, false, false, null, null, extractLocation(event), "world or chunk event");
++        }
++        if (name.contains(".server.")) {
++            return new RoutingMetadata(EventRisk.GLOBAL_SAFE, EventOwnership.GLOBAL, false, cancellable, false, false, false, null, null, null, "server event");
++        }
++        return RoutingMetadata.unknown(cancellable);
++    }
++
++    private static Location extractLocation(final Event event) {
++        try {
++            final Object value = event.getClass().getMethod("getLocation").invoke(event);
++            return value instanceof Location location ? location : null;
++        } catch (final ReflectiveOperationException ignored) {
++            return null;
++        }
++    }
++
++    private static Entity extractEntity(final Event event) {
++        try {
++            final Object value = event.getClass().getMethod("getEntity").invoke(event);
++            return value instanceof Entity entity ? entity : null;
++        } catch (final ReflectiveOperationException ignored) {
++            return null;
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingMetadata.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingMetadata.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d5aa1f288ad3e8e3f21baa8994b6f982d2dde18
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingMetadata.java
+@@ -0,0 +1,35 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import org.bukkit.Location;
++import org.bukkit.entity.Entity;
++
++public record RoutingMetadata(
++    EventRisk risk,
++    EventOwnership ownership,
++    boolean resultRequired,
++    boolean cancellable,
++    boolean hasWorldAccess,
++    boolean hasEntityAccess,
++    boolean hasPlayerAccess,
++    Object regionKey,
++    Entity entity,
++    Location location,
++    String reason
++) {
++
++    public static RoutingMetadata unknown(final boolean cancellable) {
++        return new RoutingMetadata(
++            EventRisk.UNKNOWN_OWNER_BOUND,
++            EventOwnership.UNKNOWN,
++            false,
++            cancellable,
++            true,
++            true,
++            true,
++            null,
++            null,
++            null,
++            "unknown event"
++        );
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPlan.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPlan.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..19642eee0407c5b382e956d2559df6443ad29bff
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPlan.java
+@@ -0,0 +1,8 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++public record RoutingPlan(RoutingPlanType type, RoutingMetadata metadata) {
++
++    public static RoutingPlan ownerOnly(final RoutingMetadata metadata) {
++        return new RoutingPlan(RoutingPlanType.OWNER_ONLY, metadata);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPlanType.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPlanType.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f6aec8f7c6ec04df5c4a53bd4c6abf521ae7cf6
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPlanType.java
+@@ -0,0 +1,12 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++public enum RoutingPlanType {
++    PLUGIN_ONLY,
++    PLUGIN_BLOCKING_RESULT,
++    PLUGIN_COMPUTE_THEN_OWNER_APPLY,
++    OWNER_ONLY,
++    ASYNC_PLUGIN,
++    GLOBAL_OWNER,
++    REGION_OWNER,
++    ENTITY_OWNER
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPolicy.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPolicy.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0adbeaba14b71e89e3b53c0c0be7883d129d12c4
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingPolicy.java
+@@ -0,0 +1,8 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import org.bukkit.event.Event;
++
++public interface RoutingPolicy {
++
++    RoutingPlan plan(Event event, RoutingMetadata metadata);
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/BlockSnapshot.java b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/BlockSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc1a18d15f90f5532c73db28830b37aa781997b9
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/BlockSnapshot.java
+@@ -0,0 +1,6 @@
++package io.papermc.paper.fucktick.plugin.snapshot;
++
++import org.bukkit.Material;
++
++public record BlockSnapshot(String worldName, int x, int y, int z, Material type) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/CommandContextSnapshot.java b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/CommandContextSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3047d1c211940af0d46fb41eda14e4b1d4fdccc6
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/CommandContextSnapshot.java
+@@ -0,0 +1,6 @@
++package io.papermc.paper.fucktick.plugin.snapshot;
++
++import java.util.UUID;
++
++public record CommandContextSnapshot(UUID senderUuid, String senderName, String commandLabel, String[] args) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/LocationSnapshot.java b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/LocationSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7ed7f012fdd14495f397fbc1dbf0556450ad01a
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/LocationSnapshot.java
+@@ -0,0 +1,4 @@
++package io.papermc.paper.fucktick.plugin.snapshot;
++
++public record LocationSnapshot(String worldName, double x, double y, double z, float yaw, float pitch) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/PlayerSnapshot.java b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/PlayerSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f9ec82699b2248aac4438c8747623fa8ddaf187
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/PlayerSnapshot.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.fucktick.plugin.snapshot;
++
++import java.util.UUID;
++import org.bukkit.GameMode;
++
++public record PlayerSnapshot(UUID uuid, String name, LocationSnapshot location, GameMode gameMode, boolean op) {
++}
+diff --git a/src/main/java/org/bukkit/command/PluginCommand.java b/src/main/java/org/bukkit/command/PluginCommand.java
+index 551c5af6a7bfa2268cbc63be8e70d129bccaa912..dde420d36e20d100313db317bf189d7a30c128d1 100644
+--- a/src/main/java/org/bukkit/command/PluginCommand.java
++++ b/src/main/java/org/bukkit/command/PluginCommand.java
+@@ -1,6 +1,8 @@
+ package org.bukkit.command;
+ 
+ import com.google.common.base.Preconditions;
++import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
++import io.papermc.paper.fucktick.plugin.PluginRuntimeSettings;
+ import java.util.List;
+ import org.bukkit.plugin.Plugin;
+ import org.jetbrains.annotations.NotNull;
+@@ -42,7 +44,9 @@ public final class PluginCommand extends Command implements PluginIdentifiableCo
+         }
+ 
+         try {
+-            success = executor.onCommand(sender, this, commandLabel, args);
++            // FuckTick Start - выполнение команд на потоке плагина
++            success = PluginFUCKLOADER.instance().callPluginBlocking(this.owningPlugin, "command:/" + commandLabel, () -> this.executor.onCommand(sender, this, commandLabel, args), PluginRuntimeSettings.maxBlockingCommandTimeMs());
++            // FuckTick End
+         } catch (Throwable ex) {
+             throw new CommandException("Unhandled exception executing command '" + commandLabel + "' in plugin " + owningPlugin.getDescription().getFullName(), ex);
+         }
+@@ -134,12 +138,18 @@ public final class PluginCommand extends Command implements PluginIdentifiableCo
+ 
+         List<String> completions = null;
+         try {
+-            if (completer != null) {
+-                completions = completer.onTabComplete(sender, this, alias, args);
+-            }
+-            if (completions == null && executor instanceof TabCompleter) {
+-                completions = ((TabCompleter) executor).onTabComplete(sender, this, alias, args);
+-            }
++            // FuckTick Start - tab-complete на потоке плагина
++            completions = PluginFUCKLOADER.instance().callPluginBlocking(this.owningPlugin, "tab-complete:/" + alias, () -> {
++                List<String> pluginCompletions = null;
++                if (this.completer != null) {
++                    pluginCompletions = this.completer.onTabComplete(sender, this, alias, args);
++                }
++                if (pluginCompletions == null && this.executor instanceof TabCompleter tabCompleter) {
++                    pluginCompletions = tabCompleter.onTabComplete(sender, this, alias, args);
++                }
++                return pluginCompletions;
++            }, PluginRuntimeSettings.maxBlockingTabCompleteTimeMs());
++            // FuckTick End
+         } catch (Throwable ex) {
+             StringBuilder message = new StringBuilder();
+             message.append("Unhandled exception during tab completion for command '/").append(alias).append(' ');
+diff --git a/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..aec7169cd97f436fda86a06a3d2b250f6bbf8a84
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+@@ -0,0 +1,82 @@
++package io.papermc.paper.fucktick.plugin;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.junit.jupiter.api.Test;
++
++class PluginFUCKLOADERTest {
++
++    @Test
++    void lifecycleAndCallbacksUseDedicatedThreads() throws Throwable {
++        final PluginFUCKLOADER loader = PluginFUCKLOADER.instance();
++        final Plugin first = plugin("FirstRuntimePlugin");
++        final Plugin second = plugin("SecondRuntimePlugin");
++        final AtomicReference<String> loadThread = new AtomicReference<>();
++        final AtomicReference<String> firstEnableThread = new AtomicReference<>();
++        final AtomicReference<String> secondEnableThread = new AtomicReference<>();
++        final AtomicReference<String> disableThread = new AtomicReference<>();
++
++        loader.loadPlugin(first, () -> loadThread.set(Thread.currentThread().getName()));
++        loader.enablePlugin(first, () -> firstEnableThread.set(Thread.currentThread().getName()));
++        loader.enablePlugin(second, () -> secondEnableThread.set(Thread.currentThread().getName()));
++
++        assertEquals("PluginFUCKLOADER", loadThread.get());
++        assertTrue(firstEnableThread.get().startsWith("FuckTick Plugin Thread - FirstRuntimePlugin"));
++        assertTrue(secondEnableThread.get().startsWith("FuckTick Plugin Thread - SecondRuntimePlugin"));
++        assertNotEquals(firstEnableThread.get(), secondEnableThread.get());
++
++        final String commandThread = loader.callPluginBlocking(first, "command:/runtime-test", () -> Thread.currentThread().getName(), 5_000L);
++        assertEquals(firstEnableThread.get(), commandThread);
++
++        final AtomicInteger activeCallbacks = new AtomicInteger();
++        final AtomicInteger maxActiveCallbacks = new AtomicInteger();
++        final CompletableFuture<Void> firstTask = loader.executePluginTask(first, "test:first", () -> {
++            final int active = activeCallbacks.incrementAndGet();
++            maxActiveCallbacks.accumulateAndGet(active, Math::max);
++            try {
++                Thread.sleep(50L);
++            } catch (final InterruptedException interruptedException) {
++                Thread.currentThread().interrupt();
++            }
++            activeCallbacks.decrementAndGet();
++        });
++        final CompletableFuture<Void> secondTask = loader.executePluginTask(first, "test:second", () -> {
++            final int active = activeCallbacks.incrementAndGet();
++            maxActiveCallbacks.accumulateAndGet(active, Math::max);
++            activeCallbacks.decrementAndGet();
++        });
++
++        firstTask.get(5L, TimeUnit.SECONDS);
++        secondTask.get(5L, TimeUnit.SECONDS);
++        assertEquals(1, maxActiveCallbacks.get());
++
++        loader.disablePlugin(first, () -> disableThread.set(Thread.currentThread().getName()));
++        loader.disablePlugin(second, () -> {});
++        assertEquals(firstEnableThread.get(), disableThread.get());
++        assertEquals(PluginRuntimeState.TERMINATED, loader.snapshot("FirstRuntimePlugin").state());
++        loader.shutdown();
++    }
++
++    private static Plugin plugin(final String name) {
++        final Plugin plugin = mock(Plugin.class);
++        final PluginMeta meta = mock(PluginMeta.class);
++        when(meta.getName()).thenReturn(name);
++        when(meta.getDisplayName()).thenReturn(name + " v1.0");
++        when(meta.isFoliaSupported()).thenReturn(true);
++        when(plugin.getName()).thenReturn(name);
++        when(plugin.getPluginMeta()).thenReturn(meta);
++        when(plugin.getLogger()).thenReturn(Logger.getLogger("test." + name + "." + System.nanoTime()));
++        return plugin;
++    }
++}

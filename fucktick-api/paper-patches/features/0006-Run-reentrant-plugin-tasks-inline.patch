@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 04:13:08 +0500
+Subject: [PATCH] Run reentrant plugin tasks inline
+
+
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+index 48640bcb03866241aa863c16062197b02937fd30..6f1ec8578479c4b6170bf123ace30ff4b9ecf62e 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+@@ -106,6 +106,15 @@ final class PluginRuntime {
+ 
+     CompletableFuture<Void> executeCallback(final String label, final ThrowingRunnable runnable) {
+         final CompletableFuture<Void> future = new CompletableFuture<>();
++        if (Thread.currentThread() == this.thread) {
++            try {
++                runnable.run();
++                future.complete(null);
++            } catch (final Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++            return future;
++        }
+         final PluginRuntimeState currentState = this.state.get();
+         if (currentState != PluginRuntimeState.ENABLING && currentState != PluginRuntimeState.ENABLED) {
+             future.completeExceptionally(new IllegalStateException("Plugin " + this.plugin.getName() + " is not accepting callbacks in state " + currentState));
+diff --git a/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+index aec7169cd97f436fda86a06a3d2b250f6bbf8a84..b02382f4a411ac37401635a27a83be3ad1f380f7 100644
+--- a/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
++++ b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+@@ -25,16 +25,21 @@ class PluginFUCKLOADERTest {
+         final AtomicReference<String> loadThread = new AtomicReference<>();
+         final AtomicReference<String> firstEnableThread = new AtomicReference<>();
+         final AtomicReference<String> secondEnableThread = new AtomicReference<>();
++        final AtomicReference<String> nestedTaskThread = new AtomicReference<>();
+         final AtomicReference<String> disableThread = new AtomicReference<>();
+ 
+         loader.loadPlugin(first, () -> loadThread.set(Thread.currentThread().getName()));
+-        loader.enablePlugin(first, () -> firstEnableThread.set(Thread.currentThread().getName()));
++        loader.enablePlugin(first, () -> {
++            firstEnableThread.set(Thread.currentThread().getName());
++            loader.executePluginTask(first, "test:nested-task", () -> nestedTaskThread.set(Thread.currentThread().getName())).join();
++        });
+         loader.enablePlugin(second, () -> secondEnableThread.set(Thread.currentThread().getName()));
+ 
+         assertEquals("PluginFUCKLOADER", loadThread.get());
+         assertTrue(firstEnableThread.get().startsWith("FuckTick Plugin Thread - FirstRuntimePlugin"));
+         assertTrue(secondEnableThread.get().startsWith("FuckTick Plugin Thread - SecondRuntimePlugin"));
+         assertNotEquals(firstEnableThread.get(), secondEnableThread.get());
++        assertEquals(firstEnableThread.get(), nestedTaskThread.get());
+ 
+         final String commandThread = loader.callPluginBlocking(first, "command:/runtime-test", () -> Thread.currentThread().getName(), 5_000L);
+         assertEquals(firstEnableThread.get(), commandThread);

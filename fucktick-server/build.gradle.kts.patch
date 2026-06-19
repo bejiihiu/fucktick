@@ -1,0 +1,78 @@
+--- a/folia-server/build.gradle.kts
++++ b/folia-server/build.gradle.kts
+@@ -32,7 +_,22 @@
+         }
+     }
+ 
+-    activeFork = fork
++    val fucktick = forks.register("fucktick") {
++        forks = fork
++        upstream.patchRepo("paperServer") {
++            upstreamRepo = fork.patchedRepo("paperServer")
++            patchesDir = rootDirectory.dir("fucktick-server/paper-patches")
++            outputDir = rootDirectory.dir("paper-server")
++        }
++        upstream.patchDir("foliaServer") {
++            upstreamPath = "folia-server"
++            excludes = setOf("src/minecraft", "paper-patches", "minecraft-patches", "build.gradle.kts", "build.gradle.kts.patch")
++            patchesDir = rootDirectory.dir("fucktick-server/folia-patches")
++            outputDir = rootDirectory.dir("folia-server")
++        }
++    }
++
++    activeFork = fucktick
+ 
+ 
+     updatingMinecraft {
+@@ -103,10 +_,14 @@
+     main {
+         java { srcDir("../paper-server/src/main/java"); srcDir("../paper-server/src/generated/java") }
+         resources { srcDir("../paper-server/src/main/resources") }
++        java { srcDir("../folia-server/src/main/java") }
++        resources { srcDir("../folia-server/src/main/resources") }
+     }
+     test {
+         java { srcDir("../paper-server/src/test/java") }
+         resources { srcDir("../paper-server/src/test/resources") }
++        java { srcDir("../folia-server/src/test/java") }
++        resources { srcDir("../folia-server/src/test/resources") }
+     }
+ }
+ val log4jPlugins = sourceSets.create("log4jPlugins") {
+@@ -134,7 +_,7 @@
+ }
+ 
+ dependencies {
+-    implementation(project(":folia-api"))
++    implementation(project(":fucktick-api"))
+     implementation("ca.spottedleaf:concurrentutil:0.0.10")
+     implementation("org.jline:jline-terminal-ffm:3.27.1") // use ffm on java 22+
+     implementation("org.jline:jline-terminal-jni:3.27.1") // fall back to jni on java 21
+@@ -196,14 +_,14 @@
+         val gitBranch = git.exec(providers, "rev-parse", "--abbrev-ref", "HEAD").get().trim()
+         attributes(
+             "Main-Class" to "org.bukkit.craftbukkit.Main",
+-            "Implementation-Title" to "Folia",
++            "Implementation-Title" to "FuckTick",
+             "Implementation-Version" to implementationVersion,
+             "Implementation-Vendor" to date,
+-            "Specification-Title" to "Folia",
++            "Specification-Title" to "FuckTick",
+             "Specification-Version" to project.version,
+             "Specification-Vendor" to "Paper Team",
+-            "Brand-Id" to "papermc:folia",
+-            "Brand-Name" to "Folia",
++            "Brand-Id" to "papermc:folia",
++            "Brand-Name" to "FuckTick",
+             "Build-Number" to (build ?: ""),
+             "Build-Time" to buildTime.toString(),
+             "Git-Branch" to gitBranch,
+@@ -341,7 +_,7 @@
+ }
+ 
+ fill {
+-    project("folia")
++    project("fucktick")
+     versionFamily(paperweight.minecraftVersion.map { it.split(".", "-").takeWhile { part -> part.toIntOrNull() != null }.take(2).joinToString(".") })
+     version(paperweight.minecraftVersion)
+ 

@@ -1,0 +1,379 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel override for manual runs.
+        required: true
+        default: check
+        type: choice
+        options:
+          - ignore
+          - check
+          - risk
+          - beta
+          - stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  classify:
+    name: Classify CI channel
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.policy.outputs.channel }}
+      marker: ${{ steps.policy.outputs.marker }}
+      should_build: ${{ steps.policy.outputs.should_build }}
+      should_release: ${{ steps.policy.outputs.should_release }}
+      prerelease: ${{ steps.policy.outputs.prerelease }}
+      release_label: ${{ steps.policy.outputs.release_label }}
+      release_tag: ${{ steps.policy.outputs.release_tag }}
+      retention_days: ${{ steps.policy.outputs.retention_days }}
+    steps:
+      - name: Checkout metadata
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Resolve CI marker
+        id: policy
+        env:
+          DISPATCH_CHANNEL: ${{ github.event.inputs.channel || 'check' }}
+        run: |
+          set -euo pipefail
+
+          event="${GITHUB_EVENT_NAME}"
+          channel=""
+          marker=""
+          source=""
+
+          if [ "$event" = "workflow_dispatch" ]; then
+            channel="${DISPATCH_CHANNEL}"
+            marker="manual ${channel}"
+            source="manual workflow input"
+          else
+            message="$(git log -1 --pretty=%B)"
+            last_non_empty="$(printf '%s\n' "$message" | sed '/^[[:space:]]*$/d' | tail -n 1 || true)"
+            channel="$(printf '%s\n' "$last_non_empty" | sed -nE 's/^[[:space:]]*-[[:space:]]*ci[[:space:]]+(ignore|risk|beta|stable)[[:space:]]*$/\1/p')"
+            marker_count="$(printf '%s\n' "$message" | grep -Eic '^[[:space:]]*-[[:space:]]*ci[[:space:]]+(ignore|risk|beta|stable)[[:space:]]*$' || true)"
+
+            if [ "$marker_count" -gt 1 ]; then
+              echo "::error::Exactly one CI marker is allowed in the commit message."
+              exit 1
+            fi
+
+            if [ "$marker_count" -eq 1 ] && [ -z "$channel" ]; then
+              echo "::error::The CI marker must be the final non-empty line of the commit message."
+              exit 1
+            fi
+
+            if [ -n "$channel" ]; then
+              marker="ci ${channel}"
+              source="commit message"
+            else
+              channel="check"
+              marker="none"
+              source="default verification policy"
+            fi
+          fi
+
+          case "$channel" in
+            ignore)
+              should_build=false
+              should_release=false
+              prerelease=true
+              release_label="Ignored"
+              retention_days=1
+              ;;
+            check)
+              should_build=true
+              should_release=false
+              prerelease=true
+              release_label="Verification"
+              retention_days=7
+              ;;
+            risk)
+              should_build=true
+              should_release=true
+              prerelease=true
+              release_label="Risk"
+              retention_days=14
+              ;;
+            beta)
+              should_build=true
+              should_release=true
+              prerelease=true
+              release_label="Beta"
+              retention_days=30
+              ;;
+            stable)
+              should_build=true
+              should_release=true
+              prerelease=false
+              release_label="Stable"
+              retention_days=90
+              ;;
+            *)
+              echo "::error::Unknown CI channel: ${channel}"
+              exit 1
+              ;;
+          esac
+
+          if [ "$event" = "pull_request" ]; then
+            should_release=false
+          fi
+
+          release_tag="build-${GITHUB_RUN_NUMBER}"
+
+          {
+            echo "channel=${channel}"
+            echo "marker=${marker}"
+            echo "should_build=${should_build}"
+            echo "should_release=${should_release}"
+            echo "prerelease=${prerelease}"
+            echo "release_label=${release_label}"
+            echo "release_tag=${release_tag}"
+            echo "retention_days=${retention_days}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## CI policy"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Channel | \`${channel}\` |"
+            echo "| Marker | \`${marker}\` |"
+            echo "| Source | ${source} |"
+            echo "| Build | \`${should_build}\` |"
+            echo "| Release | \`${should_release}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build server
+    needs: classify
+    if: ${{ needs.classify.outputs.should_build == 'true' && (github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name) }}
+    runs-on: ubuntu-latest
+    env:
+      BUILD_NUMBER: ${{ github.run_number }}
+      BUILD_CHANNEL: ${{ needs.classify.outputs.channel }}
+      BUILD_MARKER: ${{ needs.classify.outputs.marker }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Configure Git identity
+        run: |
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Prepare Gradle wrapper
+        run: chmod +x gradlew
+
+      - name: Apply patch stack
+        run: ./gradlew applyAllPatches --stacktrace --no-daemon
+
+      - name: Build distributable jars
+        run: ./gradlew build fucktick-server:createBundlerJar fucktick-server:createPaperclipJar --stacktrace --no-daemon
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets
+          shopt -s nullglob
+          jars=(fucktick-server/build/libs/*.jar)
+
+          if [ "${#jars[@]}" -eq 0 ]; then
+            echo "No server jars were produced in fucktick-server/build/libs" >&2
+            exit 1
+          fi
+
+          cp "${jars[@]}" release-assets/
+          (cd release-assets && sha256sum *.jar > SHA256SUMS.txt)
+          ls -lh release-assets
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fucktick-${{ needs.classify.outputs.channel }}-${{ github.run_number }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: ${{ needs.classify.outputs.retention_days }}
+
+      - name: Build summary
+        run: |
+          {
+            echo "## Build output"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Channel | \`${BUILD_CHANNEL}\` |"
+            echo "| Marker | \`${BUILD_MARKER}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Branch | \`${GITHUB_REF_NAME}\` |"
+            echo
+            echo "### Files"
+            echo
+            while IFS= read -r file; do
+              size="$(du -h "$file" | cut -f1)"
+              echo "- \`$(basename "$file")\` (${size})"
+            done < <(find release-assets -maxdepth 1 -type f | sort)
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish release
+    needs:
+      - classify
+      - build
+    if: ${{ needs.classify.outputs.should_release == 'true' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_CHANNEL: ${{ needs.classify.outputs.channel }}
+      RELEASE_LABEL: ${{ needs.classify.outputs.release_label }}
+      RELEASE_TAG: ${{ needs.classify.outputs.release_tag }}
+      RELEASE_PRERELEASE: ${{ needs.classify.outputs.prerelease }}
+      RELEASE_MARKER: ${{ needs.classify.outputs.marker }}
+      BEFORE_SHA: ${{ github.event.before || '' }}
+    steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: fucktick-${{ needs.classify.outputs.channel }}-${{ github.run_number }}
+          path: release-assets
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+
+          zero_sha="0000000000000000000000000000000000000000"
+
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$zero_sha" ] && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            range="${BEFORE_SHA}..HEAD"
+            range_note="Changes included in this push."
+          else
+            previous_tag="$(git tag --list 'build-*' --sort=-creatordate | grep -v "^${RELEASE_TAG}$" | head -n 1 || true)"
+            if [ -n "$previous_tag" ]; then
+              range="${previous_tag}..HEAD"
+              range_note="Changes since \`${previous_tag}\`."
+            else
+              range="HEAD"
+              range_note="No previous build tag was found, so this list starts from the current reachable history."
+            fi
+          fi
+
+          case "$RELEASE_CHANNEL" in
+            risk)
+              safety="Risk build. Built for validation and limited testing; it may break worlds, plugins, lifecycle behavior, or server startup."
+              ;;
+            beta)
+              safety="Beta build. Expected to be usable for testing, but still not a stable production release."
+              ;;
+            stable)
+              safety="Stable release. Intended for normal use, while still requiring normal server backups before upgrading."
+              ;;
+            *)
+              safety="Automated build."
+              ;;
+          esac
+
+          {
+            echo "# FuckTick ${RELEASE_LABEL} Build ${GITHUB_RUN_NUMBER}"
+            echo
+            echo "## Release Policy"
+            echo
+            echo "- Channel: \`${RELEASE_CHANNEL}\`"
+            echo "- Marker: \`${RELEASE_MARKER}\`"
+            echo "- Commit: [\`${GITHUB_SHA}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})"
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo
+            echo "${safety}"
+            echo
+            echo "Back up worlds, configs, plugins, and databases before testing any non-stable build."
+            echo
+            echo "## Downloads"
+            echo
+            echo "Use the paperclip jar for normal server startup unless you specifically need another generated jar. Checksums are attached in \`SHA256SUMS.txt\`."
+            echo
+            echo "## Telegram"
+            echo
+            echo "Development notes are posted at https://t.me/devfolia."
+            echo
+            echo "## Included Commits"
+            echo
+            echo "${range_note}"
+            echo
+
+            if [ "$(git rev-list --count "$range")" -eq 0 ]; then
+              echo "- No new commits were detected for this release."
+            else
+              git log --reverse --pretty=format:"- [\`%h\`](https://github.com/${GITHUB_REPOSITORY}/commit/%H) %s" "$range"
+              echo
+            fi
+          } > release-notes.md
+
+      - name: Publish GitHub release
+        run: |
+          set -euo pipefail
+
+          title="FuckTick ${RELEASE_LABEL} Build ${GITHUB_RUN_NUMBER}"
+          release_flags=()
+
+          if [ "$RELEASE_PRERELEASE" = "true" ]; then
+            release_flags+=(--prerelease)
+          else
+            release_flags+=(--latest)
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$title" \
+              --notes-file release-notes.md \
+              "${release_flags[@]}"
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes-file release-notes.md \
+              "${release_flags[@]}"
+          fi
+
+      - name: Release summary
+        run: |
+          {
+            echo "## Published release"
+            echo
+            echo "- Tag: \`${RELEASE_TAG}\`"
+            echo "- Channel: \`${RELEASE_CHANNEL}\`"
+            echo "- Prerelease: \`${RELEASE_PRERELEASE}\`"
+            echo "- URL: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          } >> "$GITHUB_STEP_SUMMARY"

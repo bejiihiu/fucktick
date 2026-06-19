@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bungeepithub@gmail.com>
+Date: Thu, 18 Jun 2026 18:10:17 +0500
+Subject: [PATCH] Route chunk save serialization through compute broker
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+index 24c8581b2fa9c3ef6f6aad64bd4454d64fe233ae..9981b04d7daac0e48370c30237dfeceebfc22215 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+@@ -29,6 +29,16 @@ import com.google.gson.JsonElement;
+ import com.google.gson.JsonNull;
+ import com.google.gson.JsonObject;
+ import com.google.gson.JsonPrimitive;
++import io.papermc.paper.fucktick.compute.ComputeApplyDecision;
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputePriority;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++import io.papermc.paper.fucktick.compute.ComputeSnapshot;
++import io.papermc.paper.fucktick.compute.ComputeTaskCancelledException;
++import io.papermc.paper.fucktick.compute.ComputeTaskHandle;
++import io.papermc.paper.fucktick.compute.ComputeTaskOwner;
++import io.papermc.paper.fucktick.compute.ComputeTaskType;
++import io.papermc.paper.fucktick.compute.FuckTickComputeBroker;
+ import it.unimi.dsi.fastutil.objects.Reference2ObjectLinkedOpenHashMap;
+ import it.unimi.dsi.fastutil.objects.Reference2ObjectMap;
+ import it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap;
+@@ -1717,19 +1727,17 @@ public final class NewChunkHolder {
+             chunk.tryMarkSaved();
+ 
+             final Completable<CompoundTag> completable = new Completable<>();
++            final String worldName = WorldUtil.getWorldName(this.world);
++            final FuckTickChunkSaveSnapshot snapshot = new FuckTickChunkSaveSnapshot(
++                ComputeGeneration.of(this.world.getRedstoneGameTime()),
++                worldName,
++                this.chunkX,
++                this.chunkZ,
++                chunkData
++            );
+ 
+             final Runnable run = () -> {
+-                final CompoundTag data;
+-                try {
+-                    data = chunkData.write();
+-                } catch (final Throwable thr) {
+-                    LOGGER.error("Failed to save chunk data (" + NewChunkHolder.this.chunkX + "," + NewChunkHolder.this.chunkZ + ") in world '" + WorldUtil.getWorldName(NewChunkHolder.this.world) + "'", thr);
+-
+-                    completable.completeExceptionally(thr);
+-                    return;
+-                }
+-
+-                completable.complete(data);
++                NewChunkHolder.this.submitComputeChunkSave(snapshot, completable);
+             };
+ 
+             final PrioritisedExecutor.PrioritisedTask task;
+@@ -1755,6 +1763,55 @@ public final class NewChunkHolder {
+         return true;
+     }
+ 
++    // FuckTick Start - сериализация сохранения чанков через compute broker
++    private void submitComputeChunkSave(final FuckTickChunkSaveSnapshot snapshot, final Completable<CompoundTag> completable) {
++        final String worldName = snapshot.worldName();
++        final SerializableChunkData chunkData = snapshot.chunkData();
++        final ComputeTaskHandle<FuckTickChunkSaveResult> handle = FuckTickComputeBroker.instance().submit(
++            ComputeTaskType.CHUNK_SAVE_SERIALIZE,
++            ComputePriority.CRITICAL_SAVE,
++            new ComputeTaskOwner(worldName, null),
++            "serialize chunk " + snapshot.chunkX() + "," + snapshot.chunkZ() + " in world " + worldName,
++            snapshot,
++            (final FuckTickChunkSaveSnapshot taskSnapshot, final io.papermc.paper.fucktick.compute.ComputeCancellationToken token) -> {
++                if (token.isCancelled()) {
++                    throw new ComputeTaskCancelledException(token.reason());
++                }
++                return new FuckTickChunkSaveResult(taskSnapshot.generation(), taskSnapshot.chunkData().write());
++            },
++            Runnable::run,
++            (context, result) -> ComputeApplyDecision.APPLIED
++        );
++        handle.result().whenComplete((final FuckTickChunkSaveResult result, final Throwable throwable) -> {
++            if (throwable == null) {
++                completable.complete(result.data());
++                return;
++            }
++            LOGGER.warn("FuckTick compute chunk serialization failed; falling back to scheduler serialization for chunk ({},{}) in world '{}'", snapshot.chunkX(), snapshot.chunkZ(), worldName, throwable);
++            this.completeChunkSaveFallback(chunkData, completable);
++        });
++    }
++
++    private void completeChunkSaveFallback(final SerializableChunkData chunkData, final Completable<CompoundTag> completable) {
++        try {
++            completable.complete(chunkData.write());
++        } catch (final Throwable thr) {
++            LOGGER.error("Failed to save chunk data (" + this.chunkX + "," + this.chunkZ + ") in world '" + WorldUtil.getWorldName(this.world) + "'", thr);
++            completable.completeExceptionally(thr);
++        }
++    }
++
++    private record FuckTickChunkSaveSnapshot(
++        ComputeGeneration generation,
++        String worldName,
++        int chunkX,
++        int chunkZ,
++        SerializableChunkData chunkData
++    ) implements ComputeSnapshot {}
++
++    private record FuckTickChunkSaveResult(ComputeGeneration generation, CompoundTag data) implements ComputeResult {}
++    // FuckTick End
++
+     private boolean lastEntitySaveNull;
+     private boolean saveEntities(final ChunkEntitySlices entities, final boolean unloading, final Completable<CompoundTag>[] entitySave) {
+         try {

@@ -1,0 +1,22 @@
+# Ignore Gradle project-specific cache directory
+.gradle
+
+AGENTS.md
+AGENT_NOTES.md
+
+# Ignore Gradle build output directory
+build
+
+/run
+
+/folia-server
+/folia-api
+/fucktick-server/build.gradle.kts
+/fucktick-server/src/minecraft
+/paper-server
+/fucktick-api/build.gradle.kts
+/paper-api
+/paper-api-generator
+
+.idea/
+.vscode/

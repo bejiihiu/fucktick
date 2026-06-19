@@ -1,0 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 03:59:41 +0500
+Subject: [PATCH] Store block snapshot material as key
+
+
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/BlockSnapshot.java b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/BlockSnapshot.java
+index fc1a18d15f90f5532c73db28830b37aa781997b9..70744c345d443eb9b20a29e5142d94019abb0f53 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/BlockSnapshot.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/snapshot/BlockSnapshot.java
+@@ -1,6 +1,4 @@
+ package io.papermc.paper.fucktick.plugin.snapshot;
+ 
+-import org.bukkit.Material;
+-
+-public record BlockSnapshot(String worldName, int x, int y, int z, Material type) {
++public record BlockSnapshot(String worldName, int x, int y, int z, String typeKey) {
+ }

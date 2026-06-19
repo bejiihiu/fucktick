@@ -1,0 +1,193 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bungeepithub@gmail.com>
+Date: Fri, 19 Jun 2026 13:37:35 +0500
+Subject: [PATCH] Handle deferred plugin runtime callbacks
+
+
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+index 8f66fd98f6c5886cbbcac8088bd45f16d2b9104d..41f0a233716f22864d18126df592042513080e2a 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+@@ -104,6 +104,14 @@ public final class PluginFUCKLOADER {
+         return runtime.executeCallback(label, runnable::run);
+     }
+ 
++    // FuckTick Start - отложенные async-задачи плагина
++    public CompletableFuture<Void> executePluginTaskDeferred(final Plugin plugin, final String label, final Runnable runnable) {
++        final PluginRuntime runtime = this.runtime(plugin);
++        runtime.start();
++        return runtime.executeCallbackDeferred(label, runnable::run);
++    }
++    // FuckTick End
++
+     public <T> T callPluginBlocking(final Plugin plugin, final String label, final Callable<T> callable, final long timeoutMs) throws Throwable {
+         final PluginRuntime runtime = this.runtime(plugin);
+         runtime.start();
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+index 6f1ec8578479c4b6170bf123ace30ff4b9ecf62e..4c877fae5eedd1b5061e94375111a6e032d89be3 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
+@@ -105,8 +105,17 @@ final class PluginRuntime {
+     }
+ 
+     CompletableFuture<Void> executeCallback(final String label, final ThrowingRunnable runnable) {
++        return this.executeCallback(label, runnable, true);
++    }
++
++    // FuckTick Start - очередь без reentrant inline для Folia AsyncScheduler
++    CompletableFuture<Void> executeCallbackDeferred(final String label, final ThrowingRunnable runnable) {
++        return this.executeCallback(label, runnable, false);
++    }
++
++    private CompletableFuture<Void> executeCallback(final String label, final ThrowingRunnable runnable, final boolean allowInline) {
+         final CompletableFuture<Void> future = new CompletableFuture<>();
+-        if (Thread.currentThread() == this.thread) {
++        if (allowInline && Thread.currentThread() == this.thread) {
+             try {
+                 runnable.run();
+                 future.complete(null);
+@@ -117,7 +126,7 @@ final class PluginRuntime {
+         }
+         final PluginRuntimeState currentState = this.state.get();
+         if (currentState != PluginRuntimeState.ENABLING && currentState != PluginRuntimeState.ENABLED) {
+-            future.completeExceptionally(new IllegalStateException("Plugin " + this.plugin.getName() + " is not accepting callbacks in state " + currentState));
++            future.completeExceptionally(new PluginRuntimeRejectedException(this.plugin.getName(), label, currentState));
+             return future;
+         }
+         final PluginTask<Void> task = new PluginTask<>(label, false, () -> {
+@@ -131,6 +140,7 @@ final class PluginRuntime {
+         }
+         return future;
+     }
++    // FuckTick End
+ 
+     void stopAndJoin(final long timeoutMs) {
+         this.stopRequested = true;
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeRejectedException.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeRejectedException.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..30e760561e4c934a0cc8c1e700f0f1347a96a470
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeRejectedException.java
+@@ -0,0 +1,36 @@
++package io.papermc.paper.fucktick.plugin;
++
++import java.util.Objects;
++
++public final class PluginRuntimeRejectedException extends IllegalStateException {
++
++    private final String pluginName;
++    private final String label;
++    private final PluginRuntimeState state;
++
++    public PluginRuntimeRejectedException(final String pluginName, final String label, final PluginRuntimeState state) {
++        super("Plugin " + pluginName + " is not accepting callbacks in state " + state);
++        this.pluginName = Objects.requireNonNull(pluginName, "pluginName");
++        this.label = Objects.requireNonNull(label, "label");
++        this.state = Objects.requireNonNull(state, "state");
++    }
++
++    public String pluginName() {
++        return this.pluginName;
++    }
++
++    public String label() {
++        return this.label;
++    }
++
++    public PluginRuntimeState state() {
++        return this.state;
++    }
++
++    public boolean isShutdownState() {
++        return switch (this.state) {
++            case DRAINING, DISABLING, DISABLED, TERMINATED -> true;
++            default -> false;
++        };
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+index b02382f4a411ac37401635a27a83be3ad1f380f7..8a2005bdac27cbe0949650bf6b119f7195794e25 100644
+--- a/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
++++ b/src/test/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADERTest.java
+@@ -1,15 +1,19 @@
+ package io.papermc.paper.fucktick.plugin;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+ import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.when;
+ 
+ import io.papermc.paper.plugin.configuration.PluginMeta;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.logging.Logger;
+ import org.bukkit.plugin.Plugin;
+@@ -22,11 +26,17 @@ class PluginFUCKLOADERTest {
+         final PluginFUCKLOADER loader = PluginFUCKLOADER.instance();
+         final Plugin first = plugin("FirstRuntimePlugin");
+         final Plugin second = plugin("SecondRuntimePlugin");
++        final Plugin deferred = plugin("DeferredRuntimePlugin");
+         final AtomicReference<String> loadThread = new AtomicReference<>();
+         final AtomicReference<String> firstEnableThread = new AtomicReference<>();
+         final AtomicReference<String> secondEnableThread = new AtomicReference<>();
+         final AtomicReference<String> nestedTaskThread = new AtomicReference<>();
+         final AtomicReference<String> disableThread = new AtomicReference<>();
++        final AtomicBoolean lifecycleActionCompleted = new AtomicBoolean();
++        final AtomicBoolean deferredSawLifecycleComplete = new AtomicBoolean();
++        final AtomicReference<String> deferredLifecycleThread = new AtomicReference<>();
++        final AtomicReference<String> deferredThread = new AtomicReference<>();
++        final AtomicReference<CompletableFuture<Void>> deferredFuture = new AtomicReference<>();
+ 
+         loader.loadPlugin(first, () -> loadThread.set(Thread.currentThread().getName()));
+         loader.enablePlugin(first, () -> {
+@@ -34,12 +44,26 @@ class PluginFUCKLOADERTest {
+             loader.executePluginTask(first, "test:nested-task", () -> nestedTaskThread.set(Thread.currentThread().getName())).join();
+         });
+         loader.enablePlugin(second, () -> secondEnableThread.set(Thread.currentThread().getName()));
++        loader.loadPlugin(deferred, () -> {});
++        loader.enablePlugin(deferred, () -> {
++            deferredLifecycleThread.set(Thread.currentThread().getName());
++            final CompletableFuture<Void> future = loader.executePluginTaskDeferred(deferred, "test:deferred-async", () -> {
++                deferredThread.set(Thread.currentThread().getName());
++                deferredSawLifecycleComplete.set(lifecycleActionCompleted.get());
++            });
++            deferredFuture.set(future);
++            assertTrue(!future.isDone());
++            lifecycleActionCompleted.set(true);
++        });
+ 
+         assertEquals("PluginFUCKLOADER", loadThread.get());
+         assertTrue(firstEnableThread.get().startsWith("FuckTick Plugin Thread - FirstRuntimePlugin"));
+         assertTrue(secondEnableThread.get().startsWith("FuckTick Plugin Thread - SecondRuntimePlugin"));
+         assertNotEquals(firstEnableThread.get(), secondEnableThread.get());
+         assertEquals(firstEnableThread.get(), nestedTaskThread.get());
++        deferredFuture.get().get(5L, TimeUnit.SECONDS);
++        assertEquals(deferredLifecycleThread.get(), deferredThread.get());
++        assertTrue(deferredSawLifecycleComplete.get());
+ 
+         final String commandThread = loader.callPluginBlocking(first, "command:/runtime-test", () -> Thread.currentThread().getName(), 5_000L);
+         assertEquals(firstEnableThread.get(), commandThread);
+@@ -68,8 +92,16 @@ class PluginFUCKLOADERTest {
+ 
+         loader.disablePlugin(first, () -> disableThread.set(Thread.currentThread().getName()));
+         loader.disablePlugin(second, () -> {});
++        loader.disablePlugin(deferred, () -> {});
+         assertEquals(firstEnableThread.get(), disableThread.get());
+         assertEquals(PluginRuntimeState.TERMINATED, loader.snapshot("FirstRuntimePlugin").state());
++
++        final CompletableFuture<Void> rejected = loader.executePluginTask(first, "test:after-disable", () -> {});
++        final ExecutionException failure = assertThrows(ExecutionException.class, () -> rejected.get(5L, TimeUnit.SECONDS));
++        final PluginRuntimeRejectedException rejectedException = assertInstanceOf(PluginRuntimeRejectedException.class, failure.getCause());
++        assertEquals(PluginRuntimeState.TERMINATED, rejectedException.state());
++        assertTrue(rejectedException.isShutdownState());
++
+         loader.shutdown();
+     }
+ 

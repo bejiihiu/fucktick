@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 04:03:35 +0500
+Subject: [PATCH] Use lifecycle timeout for plugin startup
+
+
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+index 744e97d7b29b0ad874d998ccd270e8c817af1329..8f66fd98f6c5886cbbcac8088bd45f16d2b9104d 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
+@@ -51,7 +51,7 @@ public final class PluginFUCKLOADER {
+                     loadAction.run();
+                     return null;
+                 }
+-            });
++            }, PluginRuntimeSettings.maxLifecycleTimeMs());
+             runtime.markLoaded();
+         } catch (final Throwable throwable) {
+             runtime.markFailed(throwable);
+@@ -67,7 +67,7 @@ public final class PluginFUCKLOADER {
+             runtime.callLifecycle("enable:" + plugin.getName(), () -> {
+                 enableAction.run();
+                 return null;
+-            }, PluginRuntimeSettings.maxPluginCallbackTimeMs());
++            }, PluginRuntimeSettings.maxLifecycleTimeMs());
+             runtime.markEnabled();
+             this.logCompatibilityReport(plugin, runtime);
+         } catch (final Throwable throwable) {
+@@ -167,13 +167,18 @@ public final class PluginFUCKLOADER {
+         return this.runtimes.computeIfAbsent(key(plugin.getName()), ignored -> new PluginRuntime(plugin));
+     }
+ 
+-    private <T> T callOnManagement(final Callable<T> callable) throws Throwable {
++    private <T> T callOnManagement(final Callable<T> callable, final long timeoutMs) throws Throwable {
+         if (Thread.currentThread() == this.managementThread.get()) {
+             return callable.call();
+         }
+         final Future<T> future = this.managementExecutor.submit(callable);
+         try {
+-            return future.get(PluginRuntimeSettings.maxPluginCallbackTimeMs(), TimeUnit.MILLISECONDS);
++            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
++        } catch (final java.util.concurrent.TimeoutException timeoutException) {
++            future.cancel(true);
++            final java.util.concurrent.TimeoutException diagnostic = new java.util.concurrent.TimeoutException("Plugin lifecycle timeout on PluginFUCKLOADER after " + timeoutMs + "ms");
++            diagnostic.initCause(timeoutException);
++            throw diagnostic;
+         } catch (final java.util.concurrent.ExecutionException executionException) {
+             throw executionException.getCause();
+         }
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSettings.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSettings.java
+index eb0be6bfe960aa4c7201e99d136df6632ad69645..b3985bcb56b749c3466df62441bd9b2f768b685c 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSettings.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntimeSettings.java
+@@ -25,6 +25,10 @@ public final class PluginRuntimeSettings {
+         return readLong("fucktick.plugin.maxDisableDrainTimeMs", 10_000L);
+     }
+ 
++    public static long maxLifecycleTimeMs() {
++        return readLong("fucktick.plugin.maxLifecycleTimeMs", 180_000L);
++    }
++
+     public static long maxPluginCallbackTimeMs() {
+         return readLong("fucktick.plugin.maxPluginCallbackTimeMs", 10_000L);
+     }

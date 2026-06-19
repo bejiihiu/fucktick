@@ -1,0 +1,231 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 03:54:48 +0500
+Subject: [PATCH] Add FuckTick event routing overrides
+
+
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRoutingRegistry.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRoutingRegistry.java
+index c8819fc60c021e0a0c036ced3bb3a419203d6fc3..59918f462c5c72ea8c71679e468fd038836cc69e 100644
+--- a/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRoutingRegistry.java
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/EventRoutingRegistry.java
+@@ -11,6 +11,7 @@ public final class EventRoutingRegistry {
+     private static volatile RoutingPolicy routingPolicy = ConservativeRoutingPolicy.INSTANCE;
+ 
+     static {
++        register(new RoutingOverrideTable());
+         register(new GeneratedFuckTickEventRoutingTable());
+     }
+ 
+diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingOverrideTable.java b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingOverrideTable.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c786844c68ad6d78142930daa0bd9ed8a75a1a9b
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/plugin/routing/RoutingOverrideTable.java
+@@ -0,0 +1,152 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import java.io.BufferedReader;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.nio.charset.StandardCharsets;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.Locale;
++import java.util.Map;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++
++final class RoutingOverrideTable implements EventContextExtractor<Event> {
++
++    private static final String RESOURCE = "META-INF/fucktick-event-routing-overrides.yml";
++    private static final Map<String, OverrideEntry> OVERRIDES = loadOverrides();
++
++    @Override
++    public boolean supports(final Class<? extends Event> eventClass) {
++        return OVERRIDES.containsKey(eventClass.getName());
++    }
++
++    @Override
++    public RoutingMetadata extract(final Event event) {
++        final OverrideEntry override = OVERRIDES.get(event.getClass().getName());
++        if (override == null) {
++            return RoutingMetadata.unknown(event instanceof Cancellable);
++        }
++        return override.toMetadata(event instanceof Cancellable);
++    }
++
++    static boolean hasOverride(final String eventClassName) {
++        return OVERRIDES.containsKey(eventClassName);
++    }
++
++    static RoutingMetadata metadataForClassName(final String eventClassName, final boolean cancellable) {
++        final OverrideEntry override = OVERRIDES.get(eventClassName);
++        return override == null ? null : override.toMetadata(cancellable);
++    }
++
++    private static Map<String, OverrideEntry> loadOverrides() {
++        final ClassLoader classLoader = RoutingOverrideTable.class.getClassLoader();
++        try (final InputStream input = classLoader.getResourceAsStream(RESOURCE)) {
++            if (input == null) {
++                return Map.of();
++            }
++            return Collections.unmodifiableMap(parse(input));
++        } catch (final IOException | RuntimeException exception) {
++            return Map.of();
++        }
++    }
++
++    private static Map<String, OverrideEntry> parse(final InputStream input) throws IOException {
++        final Map<String, OverrideBuilder> builders = new HashMap<>();
++        try (final BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
++            boolean inEvents = false;
++            String currentEvent = null;
++            String line;
++            while ((line = reader.readLine()) != null) {
++                final String trimmed = stripComment(line).trim();
++                if (trimmed.isEmpty()) {
++                    continue;
++                }
++                if (trimmed.equals("events:")) {
++                    inEvents = true;
++                    continue;
++                }
++                if (!inEvents) {
++                    continue;
++                }
++                if (trimmed.endsWith(":") && !trimmed.contains(" ")) {
++                    currentEvent = trimmed.substring(0, trimmed.length() - 1);
++                    builders.computeIfAbsent(currentEvent, ignored -> new OverrideBuilder());
++                    continue;
++                }
++                if (currentEvent == null) {
++                    continue;
++                }
++                final int separator = trimmed.indexOf(':');
++                if (separator < 0) {
++                    continue;
++                }
++                builders.get(currentEvent).put(trimmed.substring(0, separator), unquote(trimmed.substring(separator + 1).trim()));
++            }
++        }
++
++        final Map<String, OverrideEntry> overrides = new HashMap<>();
++        builders.forEach((eventClassName, builder) -> overrides.put(eventClassName, builder.build()));
++        return overrides;
++    }
++
++    private static String stripComment(final String line) {
++        final int comment = line.indexOf('#');
++        return comment < 0 ? line : line.substring(0, comment);
++    }
++
++    private static String unquote(final String value) {
++        if (value.length() >= 2 && ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'")))) {
++            return value.substring(1, value.length() - 1);
++        }
++        return value;
++    }
++
++    private record OverrideEntry(
++        EventRisk risk,
++        EventOwnership ownership,
++        boolean resultRequired,
++        boolean hasWorldAccess,
++        boolean hasEntityAccess,
++        boolean hasPlayerAccess,
++        String reason
++    ) {
++
++        RoutingMetadata toMetadata(final boolean cancellable) {
++            return new RoutingMetadata(this.risk, this.ownership, this.resultRequired, cancellable, this.hasWorldAccess, this.hasEntityAccess, this.hasPlayerAccess, null, null, null, this.reason);
++        }
++    }
++
++    private static final class OverrideBuilder {
++        private EventRisk risk = EventRisk.UNKNOWN_OWNER_BOUND;
++        private EventOwnership ownership = EventOwnership.UNKNOWN;
++        private boolean resultRequired;
++        private boolean hasWorldAccess;
++        private boolean hasEntityAccess;
++        private boolean hasPlayerAccess;
++        private String reason = "override";
++
++        void put(final String key, final String value) {
++            switch (normalizeKey(key)) {
++                case "risk" -> this.risk = EventRisk.valueOf(value.toUpperCase(Locale.ROOT));
++                case "ownership" -> this.ownership = EventOwnership.valueOf(value.toUpperCase(Locale.ROOT));
++                case "result-required" -> this.resultRequired = Boolean.parseBoolean(value);
++                case "has-world-access" -> this.hasWorldAccess = Boolean.parseBoolean(value);
++                case "has-entity-access" -> this.hasEntityAccess = Boolean.parseBoolean(value);
++                case "has-player-access" -> this.hasPlayerAccess = Boolean.parseBoolean(value);
++                case "reason" -> this.reason = value;
++                default -> {
++                }
++            }
++        }
++
++        OverrideEntry build() {
++            return new OverrideEntry(this.risk, this.ownership, this.resultRequired, this.hasWorldAccess, this.hasEntityAccess, this.hasPlayerAccess, this.reason);
++        }
++
++        private static String normalizeKey(final String key) {
++            return key.replace('_', '-').replaceAll("([a-z])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT);
++        }
++    }
++}
+diff --git a/src/main/resources/META-INF/fucktick-event-routing-overrides.yml b/src/main/resources/META-INF/fucktick-event-routing-overrides.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d4ea74f17d6ac6311e900db9920376dde5f73a2
+--- /dev/null
++++ b/src/main/resources/META-INF/fucktick-event-routing-overrides.yml
+@@ -0,0 +1,16 @@
++events:
++    org.bukkit.event.block.BlockBreakEvent:
++        risk: OWNER_BOUND
++        ownership: REGION
++        hasWorldAccess: true
++        reason: "block mutation event"
++    org.bukkit.event.player.AsyncPlayerChatEvent:
++        risk: PLUGIN_LOCAL
++        ownership: NONE
++        hasPlayerAccess: true
++        reason: "legacy async chat-style event"
++    org.bukkit.event.server.ServerListPingEvent:
++        risk: RESULT_REQUIRED
++        ownership: GLOBAL
++        resultRequired: true
++        reason: "server ping result event"
+diff --git a/src/test/java/io/papermc/paper/fucktick/plugin/routing/RoutingOverrideTableTest.java b/src/test/java/io/papermc/paper/fucktick/plugin/routing/RoutingOverrideTableTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d677c03fb2585d02d569cd6779bf4ce4bd18f18
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/fucktick/plugin/routing/RoutingOverrideTableTest.java
+@@ -0,0 +1,27 @@
++package io.papermc.paper.fucktick.plugin.routing;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.junit.jupiter.api.Test;
++
++class RoutingOverrideTableTest {
++
++    @Test
++    void loadsMetadataOverridesFromClasspath() {
++        assertTrue(RoutingOverrideTable.hasOverride("org.bukkit.event.block.BlockBreakEvent"));
++
++        final RoutingMetadata blockBreak = RoutingOverrideTable.metadataForClassName("org.bukkit.event.block.BlockBreakEvent", true);
++        assertNotNull(blockBreak);
++        assertEquals(EventRisk.OWNER_BOUND, blockBreak.risk());
++        assertEquals(EventOwnership.REGION, blockBreak.ownership());
++        assertTrue(blockBreak.hasWorldAccess());
++
++        final RoutingMetadata serverPing = RoutingOverrideTable.metadataForClassName("org.bukkit.event.server.ServerListPingEvent", false);
++        assertNotNull(serverPing);
++        assertEquals(EventRisk.RESULT_REQUIRED, serverPing.risk());
++        assertEquals(EventOwnership.GLOBAL, serverPing.ownership());
++        assertTrue(serverPing.resultRequired());
++    }
++}

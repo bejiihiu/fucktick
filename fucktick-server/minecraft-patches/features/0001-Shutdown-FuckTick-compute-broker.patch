@@ -1,0 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 17:27:01 +0500
+Subject: [PATCH] Shutdown FuckTick compute broker
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 8ec86d7485efbb275c85d8226ea93a7bbd72342c..2db84ba63df8dd646226fb4c5422e2b640466d03 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1120,6 +1120,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
+         LOGGER.info("Stopping server");
+         Commands.COMMAND_SENDING_POOL.shutdownNow(); // Paper - Perf: Async command map building; Shutdown and don't bother finishing
++        // FuckTick Start - остановка compute broker
++        io.papermc.paper.fucktick.compute.FuckTickComputeBroker.shutdownIfInitialized();
++        // FuckTick End
+         // CraftBukkit start
+         if (this.server != null) {
+             this.server.spark.disable(); // Paper - spark
