@@ -5,7 +5,7 @@ Subject: [PATCH] Suppress async scheduler shutdown rejects
 
 
 diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
-index 209ba27fc8a4bce8898f59abc9d7657b03e6591d..027e410fb05c933ea69f15e1abd0750b1049a6f6 100644
+index 209ba27fc8a4bce8898f59abc9d7657b03e6591d..24457173354502768f31090a568689fb4f3c4b2b 100644
 --- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
 +++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
 @@ -2,14 +2,17 @@ package io.papermc.paper.threadedregions.scheduler;
@@ -32,7 +32,7 @@ index 209ba27fc8a4bce8898f59abc9d7657b03e6591d..027e410fb05c933ea69f15e1abd0750b
          this.tasks.add(ret);
 -        // FuckTick Start - AsyncScheduler выполняет plugin code на потоке плагина
 -        PluginFUCKLOADER.instance().executePluginTask(plugin, "async-scheduler:runNow", ret).whenComplete((ignored, throwable) -> {
-+        // FuckTick Start - AsyncScheduler ставит plugin code в очередь плагина без inline
++        // FuckTick Start - AsyncScheduler ставит код плагина в очередь без прямого запуска
 +        PluginFUCKLOADER.instance().executePluginTaskDeferred(plugin, "async-scheduler:runNow", ret).whenComplete((ignored, throwable) -> {
              if (throwable != null) {
 -                ret.cancel();
@@ -76,7 +76,7 @@ index 209ba27fc8a4bce8898f59abc9d7657b03e6591d..027e410fb05c933ea69f15e1abd0750b
                  // so we just schedule onto the executor
 -                // FuckTick Start - таймер передает async task в очередь плагина
 -                PluginFUCKLOADER.instance().executePluginTask(this.plugin, "async-scheduler:timer", this).whenComplete((ignored, throwable) -> {
-+                // FuckTick Start - таймер передает async task в очередь плагина без inline
++                // FuckTick Start - таймер передает асинхронную задачу в очередь без прямого запуска
 +                PluginFUCKLOADER.instance().executePluginTaskDeferred(this.plugin, "async-scheduler:timer", this).whenComplete((ignored, throwable) -> {
                      if (throwable != null) {
 -                        this.cancel();

@@ -5,14 +5,14 @@ Subject: [PATCH] Handle deferred plugin runtime callbacks
 
 
 diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
-index 8f66fd98f6c5886cbbcac8088bd45f16d2b9104d..41f0a233716f22864d18126df592042513080e2a 100644
+index 8f66fd98f6c5886cbbcac8088bd45f16d2b9104d..3eda84686fe2f42a8ece87b1beda79b049d2d98d 100644
 --- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
 +++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginFUCKLOADER.java
 @@ -104,6 +104,14 @@ public final class PluginFUCKLOADER {
          return runtime.executeCallback(label, runnable::run);
      }
  
-+    // FuckTick Start - отложенные async-задачи плагина
++    // FuckTick Start - отложенные асинхронные задачи плагина
 +    public CompletableFuture<Void> executePluginTaskDeferred(final Plugin plugin, final String label, final Runnable runnable) {
 +        final PluginRuntime runtime = this.runtime(plugin);
 +        runtime.start();
@@ -24,7 +24,7 @@ index 8f66fd98f6c5886cbbcac8088bd45f16d2b9104d..41f0a233716f22864d18126df5920425
          final PluginRuntime runtime = this.runtime(plugin);
          runtime.start();
 diff --git a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
-index 6f1ec8578479c4b6170bf123ace30ff4b9ecf62e..4c877fae5eedd1b5061e94375111a6e032d89be3 100644
+index 6f1ec8578479c4b6170bf123ace30ff4b9ecf62e..e033d38a6efb57e171600302eb5f4b7a7ded9a29 100644
 --- a/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
 +++ b/src/main/java/io/papermc/paper/fucktick/plugin/PluginRuntime.java
 @@ -105,8 +105,17 @@ final class PluginRuntime {
@@ -34,7 +34,7 @@ index 6f1ec8578479c4b6170bf123ace30ff4b9ecf62e..4c877fae5eedd1b5061e94375111a6e0
 +        return this.executeCallback(label, runnable, true);
 +    }
 +
-+    // FuckTick Start - очередь без reentrant inline для Folia AsyncScheduler
++    // FuckTick Start - очередь без повторного прямого запуска для Folia AsyncScheduler
 +    CompletableFuture<Void> executeCallbackDeferred(final String label, final ThrowingRunnable runnable) {
 +        return this.executeCallback(label, runnable, false);
 +    }
