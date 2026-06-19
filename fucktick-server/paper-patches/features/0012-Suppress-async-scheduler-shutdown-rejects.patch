@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bungeepithub@gmail.com>
+Date: Fri, 19 Jun 2026 13:37:35 +0500
+Subject: [PATCH] Suppress async scheduler shutdown rejects
+
+
+diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
+index 209ba27fc8a4bce8898f59abc9d7657b03e6591d..027e410fb05c933ea69f15e1abd0750b1049a6f6 100644
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
+@@ -2,14 +2,17 @@ package io.papermc.paper.threadedregions.scheduler;
+ 
+ import com.mojang.logging.LogUtils;
+ import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
++import io.papermc.paper.fucktick.plugin.PluginRuntimeRejectedException;
+ import org.bukkit.plugin.IllegalPluginAccessException;
+ import org.bukkit.plugin.Plugin;
+ import org.slf4j.Logger;
+ import java.util.Objects;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.CompletionException;
+ import java.util.concurrent.Executor;
+ import java.util.concurrent.Executors;
++import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.ScheduledExecutorService;
+ import java.util.concurrent.ScheduledFuture;
+ import java.util.concurrent.SynchronousQueue;
+@@ -73,11 +76,10 @@ public final class FoliaAsyncScheduler implements AsyncScheduler {
+         final AsyncScheduledTask ret = new AsyncScheduledTask(plugin, -1L, task, null, -1L);
+ 
+         this.tasks.add(ret);
+-        // FuckTick Start - AsyncScheduler выполняет plugin code на потоке плагина
+-        PluginFUCKLOADER.instance().executePluginTask(plugin, "async-scheduler:runNow", ret).whenComplete((ignored, throwable) -> {
++        // FuckTick Start - AsyncScheduler ставит plugin code в очередь плагина без inline
++        PluginFUCKLOADER.instance().executePluginTaskDeferred(plugin, "async-scheduler:runNow", ret).whenComplete((ignored, throwable) -> {
+             if (throwable != null) {
+-                ret.cancel();
+-                plugin.getLogger().log(Level.WARNING, "Async task for " + plugin.getDescription().getFullName() + " could not be queued on plugin thread", throwable);
++                this.handlePluginThreadQueueFailure(plugin, ret, throwable);
+             }
+         });
+         // FuckTick End
+@@ -127,8 +129,27 @@ public final class FoliaAsyncScheduler implements AsyncScheduler {
+         return this.scheduleTimerTask(plugin, task, initialDelay, period, unit);
+     }
+ 
++    // FuckTick Start - подавление штатных отказов runtime при остановке
++    private void handlePluginThreadQueueFailure(final Plugin plugin, final AsyncScheduledTask task, final Throwable throwable) {
++        task.cancel();
++        final Throwable cause = unwrapCompletionFailure(throwable);
++        if (cause instanceof final PluginRuntimeRejectedException rejectedException && rejectedException.isShutdownState()) {
++            return;
++        }
++        plugin.getLogger().log(Level.WARNING, "Async task for " + plugin.getDescription().getFullName() + " could not be queued on plugin thread", throwable);
++    }
++
++    private static Throwable unwrapCompletionFailure(final Throwable throwable) {
++        Throwable current = throwable;
++        while ((current instanceof CompletionException || current instanceof ExecutionException) && current.getCause() != null) {
++            current = current.getCause();
++        }
++        return current;
++    }
++    // FuckTick End
++
+     private AsyncScheduledTask scheduleTimerTask(final Plugin plugin, final Consumer<ScheduledTask> task, final long initialDelay,
+-                                                 final long period, final TimeUnit unit) {
++                                                  final long period, final TimeUnit unit) {
+         final AsyncScheduledTask ret = new AsyncScheduledTask(
+             plugin, period <= 0 ? period : unit.toNanos(period), task, null,
+             System.nanoTime() + unit.toNanos(initialDelay)
+@@ -216,11 +237,10 @@ public final class FoliaAsyncScheduler implements AsyncScheduler {
+             if (timer) {
+                 // the scheduled executor is single thread, and unfortunately not expandable with threads
+                 // so we just schedule onto the executor
+-                // FuckTick Start - таймер передает async task в очередь плагина
+-                PluginFUCKLOADER.instance().executePluginTask(this.plugin, "async-scheduler:timer", this).whenComplete((ignored, throwable) -> {
++                // FuckTick Start - таймер передает async task в очередь плагина без inline
++                PluginFUCKLOADER.instance().executePluginTaskDeferred(this.plugin, "async-scheduler:timer", this).whenComplete((ignored, throwable) -> {
+                     if (throwable != null) {
+-                        this.cancel();
+-                        this.plugin.getLogger().log(Level.WARNING, "Async task for " + this.plugin.getDescription().getFullName() + " could not be queued on plugin thread", throwable);
++                        FoliaAsyncScheduler.this.handlePluginThreadQueueFailure(this.plugin, this, throwable);
+                     }
+                 });
+                 // FuckTick End

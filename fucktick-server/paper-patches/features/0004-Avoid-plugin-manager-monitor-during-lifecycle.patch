@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 04:30:51 +0500
+Subject: [PATCH] Avoid plugin manager monitor during lifecycle
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+index 14dae7c0daf8690a6042dc6e4533cbcac7f76444..1d120bd937a66415c130fc71fc00be74ff18b5c8 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+@@ -172,14 +172,14 @@ class PaperPluginInstanceManager {
+     }
+ 
+     public void clearPlugins() {
++        this.disablePlugins();
+         synchronized (this) {
+-            this.disablePlugins();
+             this.plugins.clear();
+             this.lookupNames.clear();
+         }
+     }
+ 
+-    public synchronized void enablePlugin(@NotNull Plugin plugin) {
++    public void enablePlugin(@NotNull Plugin plugin) {
+         if (plugin.isEnabled()) {
+             return;
+         }
+@@ -230,7 +230,7 @@ class PaperPluginInstanceManager {
+         HandlerList.bakeAll();
+     }
+ 
+-    public synchronized void disablePlugin(@NotNull Plugin plugin) {
++    public void disablePlugin(@NotNull Plugin plugin) {
+         if (!(plugin instanceof JavaPlugin javaPlugin)) {
+             throw new IllegalArgumentException("Only expects java plugins.");
+         }

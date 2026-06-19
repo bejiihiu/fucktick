@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 04:47:40 +0500
+Subject: [PATCH] Allow lifecycle recipe registration on plugin thread
+
+
+diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
+index 7e7a0ed944961af5ab7a49bc659da2862d2e2c82..c2f52791cc3b5451d86f0a16c60301de64e5a877 100644
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -1,11 +1,17 @@
+ package org.spigotmc;
+ 
++import io.papermc.paper.fucktick.plugin.FuckTickPluginContext;
+ import net.minecraft.server.MinecraftServer;
+ 
+ public class AsyncCatcher {
+ 
+     public static void catchOp(String reason) {
+         if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) { // Paper - chunk system
++            // FuckTick Start - рецепты во время включения плагина
++            if ("Recipe Add".equals(reason) && "plugin-lifecycle".equals(FuckTickPluginContext.currentContextName())) {
++                return;
++            }
++            // FuckTick End
+             MinecraftServer.LOGGER.error("Thread {} failed main thread check: {}", Thread.currentThread().getName(), reason, new Throwable()); // Paper
+             throw new IllegalStateException("Asynchronous " + reason + "!");
+         }

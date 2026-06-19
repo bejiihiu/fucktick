@@ -1,0 +1,2505 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 17:27:01 +0500
+Subject: [PATCH] Add FuckTick compute broker
+
+
+diff --git a/src/main/java/io/papermc/paper/command/FuckTickCommand.java b/src/main/java/io/papermc/paper/command/FuckTickCommand.java
+index 74b7852e843593f792d684667de9b567a7aab7be..453bb61a16cbeb7af92380a6aa1707a5b4981ef8 100644
+--- a/src/main/java/io/papermc/paper/command/FuckTickCommand.java
++++ b/src/main/java/io/papermc/paper/command/FuckTickCommand.java
+@@ -1,9 +1,17 @@
+ package io.papermc.paper.command;
+ 
++import io.papermc.paper.fucktick.compute.ComputeBrokerSnapshot;
++import io.papermc.paper.fucktick.compute.ComputeTaskSnapshot;
++import io.papermc.paper.fucktick.compute.ComputeTaskState;
++import io.papermc.paper.fucktick.compute.ComputeTaskTypeSnapshot;
++import io.papermc.paper.fucktick.compute.ComputeWorkerSnapshot;
++import io.papermc.paper.fucktick.compute.FuckTickComputeBroker;
+ import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
+ import io.papermc.paper.fucktick.plugin.PluginRuntimeSnapshot;
+ import java.io.PrintWriter;
+ import java.io.StringWriter;
++import java.text.DecimalFormat;
++import java.util.Comparator;
+ import java.util.List;
+ import org.bukkit.Bukkit;
+ import org.bukkit.command.Command;
+@@ -14,10 +22,12 @@ import org.jetbrains.annotations.NotNull;
+ 
+ public final class FuckTickCommand extends Command {
+ 
++    private static final ThreadLocal<DecimalFormat> ONE_DECIMAL = ThreadLocal.withInitial(() -> new DecimalFormat("#,##0.0"));
++
+     public FuckTickCommand(final String name) {
+         super(name);
+         this.description = "FuckTick diagnostics";
+-        this.usageMessage = "/fucktick plugins threads | /fucktick plugin <name> dump|queue|routing";
++        this.usageMessage = "/fucktick plugins threads | /fucktick plugin <name> dump|queue|routing | /fucktick compute status|workers|queue|tasks|task <id>";
+         this.setPermission("bukkit.command.fucktick");
+         Bukkit.getPluginManager().addPermission(new Permission("bukkit.command.fucktick", PermissionDefault.OP));
+     }
+@@ -27,6 +37,12 @@ public final class FuckTickCommand extends Command {
+         if (!this.testPermission(sender)) {
+             return true;
+         }
++        // FuckTick Start - диагностика compute broker
++        if (args.length >= 2 && args[0].equalsIgnoreCase("compute")) {
++            this.sendCompute(sender, args);
++            return true;
++        }
++        // FuckTick End
+         if (args.length >= 2 && args[0].equalsIgnoreCase("plugins") && args[1].equalsIgnoreCase("threads")) {
+             this.sendThreads(sender);
+             return true;
+@@ -52,7 +68,7 @@ public final class FuckTickCommand extends Command {
+     @Override
+     public @NotNull List<String> tabComplete(final @NotNull CommandSender sender, final @NotNull String alias, final @NotNull String[] args) throws IllegalArgumentException {
+         if (args.length == 1) {
+-            return matchingLast(args, List.of("plugins", "plugin"));
++            return matchingLast(args, List.of("plugins", "plugin", "compute"));
+         }
+         if (args.length == 2 && args[0].equalsIgnoreCase("plugins")) {
+             return matchingLast(args, List.of("threads"));
+@@ -63,6 +79,14 @@ public final class FuckTickCommand extends Command {
+         if (args.length == 3 && args[0].equalsIgnoreCase("plugin")) {
+             return matchingLast(args, List.of("dump", "queue", "routing"));
+         }
++        // FuckTick Start - tab-complete диагностики compute broker
++        if (args.length == 2 && args[0].equalsIgnoreCase("compute")) {
++            return matchingLast(args, List.of("status", "workers", "queue", "tasks", "task"));
++        }
++        if (args.length == 3 && args[0].equalsIgnoreCase("compute") && args[1].equalsIgnoreCase("task")) {
++            return matchingLast(args, FuckTickComputeBroker.instance().snapshot().tasks().stream().map(task -> Long.toString(task.id())).toList());
++        }
++        // FuckTick End
+         return List.of();
+     }
+ 
+@@ -120,4 +144,132 @@ public final class FuckTickCommand extends Command {
+         sender.sendMessage("GlobalRegionScheduler: owner-thread");
+         sender.sendMessage("Unknown events: owner-only");
+     }
++
++    // FuckTick Start - вывод состояния compute broker
++    private void sendCompute(final CommandSender sender, final String[] args) {
++        final ComputeBrokerSnapshot snapshot = FuckTickComputeBroker.instance().snapshot();
++        switch (args[1].toLowerCase(java.util.Locale.ROOT)) {
++            case "status" -> this.sendComputeStatus(sender, snapshot);
++            case "workers" -> this.sendComputeWorkers(sender, snapshot);
++            case "queue" -> this.sendComputeQueue(sender, snapshot);
++            case "tasks" -> this.sendComputeTasks(sender, snapshot);
++            case "task" -> {
++                if (args.length < 3) {
++                    sender.sendMessage("Usage: /fucktick compute task <id>");
++                    return;
++                }
++                try {
++                    this.sendComputeTask(sender, Long.parseLong(args[2]));
++                } catch (final NumberFormatException ex) {
++                    sender.sendMessage("Compute task id must be a number: " + args[2]);
++                }
++            }
++            default -> sender.sendMessage("Usage: " + this.usageMessage);
++        }
++    }
++
++    private void sendComputeStatus(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        final long completed = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::completed).sum();
++        final long applied = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::applied).sum();
++        final long stale = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::stale).sum();
++        final long rejected = snapshot.taskTypes().stream().mapToLong(ComputeTaskTypeSnapshot::rejected).sum();
++        sender.sendMessage("Compute Broker:");
++        sender.sendMessage("Workers: " + snapshot.workerCount());
++        sender.sendMessage("Queued: " + snapshot.queuedTasks());
++        sender.sendMessage("Running: " + snapshot.runningTasks());
++        sender.sendMessage("Completed: " + completed);
++        sender.sendMessage("Applied: " + applied);
++        sender.sendMessage("Stale: " + stale);
++        sender.sendMessage("Rejected: " + rejected);
++        sender.sendMessage("Shutdown: " + snapshot.shutdown());
++        sender.sendMessage("Top task types:");
++        snapshot.taskTypes().stream()
++            .filter(type -> type.submitted() > 0L || type.rejected() > 0L)
++            .sorted(Comparator.comparingLong(ComputeTaskTypeSnapshot::submitted).reversed())
++            .limit(8L)
++            .forEach(type -> sender.sendMessage(type.type()
++                + " queued=" + type.queued()
++                + " running=" + type.running()
++                + " avgCompute=" + ONE_DECIMAL.get().format(type.averageComputeTimeMs()) + "ms"
++                + " stale=" + type.stale()
++                + " rejected=" + type.rejected()));
++    }
++
++    private void sendComputeWorkers(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        for (final ComputeWorkerSnapshot worker : snapshot.workers()) {
++            sender.sendMessage(worker.name() + " alive=" + worker.alive() + " task=" + (worker.taskId() == null ? "-" : worker.taskId()));
++        }
++    }
++
++    private void sendComputeQueue(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        final List<ComputeTaskSnapshot> queued = snapshot.tasks().stream()
++            .filter(task -> task.state() == ComputeTaskState.QUEUED || task.state() == ComputeTaskState.SNAPSHOTTED || task.state() == ComputeTaskState.SUBMITTED)
++            .sorted(Comparator.comparing(ComputeTaskSnapshot::priority).thenComparingLong(ComputeTaskSnapshot::id))
++            .limit(20L)
++            .toList();
++        if (queued.isEmpty()) {
++            sender.sendMessage("Compute queue is empty.");
++            return;
++        }
++        for (final ComputeTaskSnapshot task : queued) {
++            sender.sendMessage(this.formatComputeTaskLine(task));
++        }
++    }
++
++    private void sendComputeTasks(final CommandSender sender, final ComputeBrokerSnapshot snapshot) {
++        final List<ComputeTaskSnapshot> tasks = snapshot.tasks().stream().limit(20L).toList();
++        if (tasks.isEmpty()) {
++            sender.sendMessage("No compute tasks tracked.");
++            return;
++        }
++        for (final ComputeTaskSnapshot task : tasks) {
++            sender.sendMessage(this.formatComputeTaskLine(task));
++        }
++    }
++
++    private void sendComputeTask(final CommandSender sender, final long taskId) {
++        final ComputeTaskSnapshot task = FuckTickComputeBroker.instance().taskSnapshot(taskId);
++        if (task == null) {
++            sender.sendMessage("Unknown compute task: " + taskId);
++            return;
++        }
++        sender.sendMessage("Task: " + task.id());
++        sender.sendMessage("Type: " + task.type());
++        sender.sendMessage("Priority: " + task.priority());
++        sender.sendMessage("State: " + task.state());
++        sender.sendMessage("Owner: " + task.owner().displayName());
++        sender.sendMessage("Generation: " + task.generation().value());
++        sender.sendMessage("Description: " + task.description());
++        sender.sendMessage("Worker thread: " + blankDash(task.workerThread()));
++        sender.sendMessage("Apply thread: " + blankDash(task.applyThread()));
++        sender.sendMessage("Queue time: " + millisOrDash(task.queueTimeMs()));
++        sender.sendMessage("Compute time: " + millisOrDash(task.computeTimeMs()));
++        sender.sendMessage("Apply delay: " + millisOrDash(task.applyDelayMs()));
++        if (task.cancelled()) {
++            sender.sendMessage("Cancellation: " + blankDash(task.cancellationReason()));
++        }
++        if (!task.failureMessage().isBlank()) {
++            sender.sendMessage("Failure: " + task.failureMessage());
++        }
++    }
++
++    private String formatComputeTaskLine(final ComputeTaskSnapshot task) {
++        return "#" + task.id()
++            + " " + task.type()
++            + " state=" + task.state()
++            + " priority=" + task.priority()
++            + " owner=" + task.owner().displayName()
++            + " queue=" + millisOrDash(task.queueTimeMs())
++            + " compute=" + millisOrDash(task.computeTimeMs())
++            + " description=\"" + task.description() + "\"";
++    }
++
++    private static String millisOrDash(final long millis) {
++        return millis < 0L ? "-" : millis + "ms";
++    }
++
++    private static String blankDash(final String value) {
++        return value == null || value.isBlank() ? "-" : value;
++    }
++    // FuckTick End
+ }
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyContext.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyContext.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..81faf67ffe9119d609a342399c3e41eac37a05f0
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyContext.java
+@@ -0,0 +1,14 @@
++package io.papermc.paper.fucktick.compute;
++
++public record ComputeApplyContext(
++    long taskId,
++    ComputeTaskType taskType,
++    ComputeTaskOwner owner,
++    ComputeGeneration generation,
++    ComputeCancellationToken cancellationToken
++) {
++
++    public boolean isCancelled() {
++        return this.cancellationToken.isCancelled();
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyDecision.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyDecision.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef658aec62168f1405f6cba8a73759e120752e83
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyDecision.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.fucktick.compute;
++
++public enum ComputeApplyDecision {
++    APPLIED,
++    STALE,
++    CANCELLED
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyExecutor.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyExecutor.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f93ce49a587fce8315ace1a8fcb4fd3afcb15650
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyExecutor.java
+@@ -0,0 +1,15 @@
++package io.papermc.paper.fucktick.compute;
++
++@FunctionalInterface
++public interface ComputeApplyExecutor {
++
++    void execute(Runnable runnable);
++
++    default String ownerContext() {
++        return Thread.currentThread().getName();
++    }
++
++    default boolean isOwnerThread() {
++        return true;
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyHandle.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyHandle.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bc8194d6a77b0bcd189042ff48055c9973d99f7
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeApplyHandle.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.fucktick.compute;
++
++@FunctionalInterface
++public interface ComputeApplyHandle<R extends ComputeResult> {
++
++    ComputeApplyDecision apply(ComputeApplyContext context, R result) throws Exception;
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeBrokerSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeBrokerSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..76cf469a32209dc354148c62930654cb2e54e0a1
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeBrokerSnapshot.java
+@@ -0,0 +1,14 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.util.List;
++
++public record ComputeBrokerSnapshot(
++    boolean shutdown,
++    int workerCount,
++    int queuedTasks,
++    int runningTasks,
++    List<ComputeWorkerSnapshot> workers,
++    List<ComputeTaskTypeSnapshot> taskTypes,
++    List<ComputeTaskSnapshot> tasks
++) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeBudgetPolicy.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeBudgetPolicy.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..31ccd481a3f30c54854318cc164dccb5ff591973
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeBudgetPolicy.java
+@@ -0,0 +1,76 @@
++package io.papermc.paper.fucktick.compute;
++
++public record ComputeBudgetPolicy(
++    int workerCount,
++    int maxQueuedComputeTasks,
++    int maxQueuedComputeTasksPerWorld,
++    int maxQueuedComputeTasksPerPlugin,
++    int maxPathfindingTasksPerTick,
++    int maxExplosionPrecomputeTasksPerTick,
++    int maxChunkSerializationTasks,
++    long maxComputeTimeMs,
++    long maxApplyDelayMs,
++    long shutdownWaitMs,
++    int maxTrackedTasks
++) {
++
++    public ComputeBudgetPolicy {
++        if (workerCount < 1) {
++            throw new IllegalArgumentException("workerCount must be positive");
++        }
++        if (maxQueuedComputeTasks < 1 || maxQueuedComputeTasksPerWorld < 1 || maxQueuedComputeTasksPerPlugin < 1) {
++            throw new IllegalArgumentException("queue limits must be positive");
++        }
++        if (maxPathfindingTasksPerTick < 1 || maxExplosionPrecomputeTasksPerTick < 1 || maxChunkSerializationTasks < 1) {
++            throw new IllegalArgumentException("task type limits must be positive");
++        }
++        if (maxComputeTimeMs < 1L || maxApplyDelayMs < 1L || shutdownWaitMs < 1L) {
++            throw new IllegalArgumentException("time limits must be positive");
++        }
++        if (maxTrackedTasks < 32) {
++            throw new IllegalArgumentException("maxTrackedTasks must be at least 32");
++        }
++    }
++
++    public static ComputeBudgetPolicy fromSystemProperties() {
++        final int processors = Math.max(1, Runtime.getRuntime().availableProcessors());
++        final int defaultWorkers = Math.max(1, Math.min(8, processors / 2));
++        return new ComputeBudgetPolicy(
++            readInt("fucktick.compute.workers", defaultWorkers),
++            readInt("fucktick.compute.maxQueuedTasks", 5_000),
++            readInt("fucktick.compute.maxQueuedTasksPerWorld", 2_000),
++            readInt("fucktick.compute.maxQueuedTasksPerPlugin", 1_000),
++            readInt("fucktick.compute.maxPathfindingTasksPerTick", 256),
++            readInt("fucktick.compute.maxExplosionPrecomputeTasksPerTick", 64),
++            readInt("fucktick.compute.maxChunkSerializationTasks", 256),
++            readLong("fucktick.compute.maxComputeTimeMs", 5_000L),
++            readLong("fucktick.compute.maxApplyDelayMs", 10_000L),
++            readLong("fucktick.compute.shutdownWaitMs", 10_000L),
++            readInt("fucktick.compute.maxTrackedTasks", 2_048)
++        );
++    }
++
++    private static int readInt(final String property, final int fallback) {
++        final String value = System.getProperty(property);
++        if (value == null || value.isBlank()) {
++            return fallback;
++        }
++        try {
++            return Integer.parseInt(value);
++        } catch (final NumberFormatException ex) {
++            return fallback;
++        }
++    }
++
++    private static long readLong(final String property, final long fallback) {
++        final String value = System.getProperty(property);
++        if (value == null || value.isBlank()) {
++            return fallback;
++        }
++        try {
++            return Long.parseLong(value);
++        } catch (final NumberFormatException ex) {
++            return fallback;
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeCancellationToken.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeCancellationToken.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1a7fac24a568fff074dad0bb28dd2ac294b7af6
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeCancellationToken.java
+@@ -0,0 +1,31 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.util.concurrent.atomic.AtomicBoolean;
++
++public final class ComputeCancellationToken {
++
++    private final AtomicBoolean cancelled = new AtomicBoolean();
++    private volatile String reason = "";
++
++    public boolean cancel(final String reason) {
++        final boolean changed = this.cancelled.compareAndSet(false, true);
++        if (changed) {
++            this.reason = reason == null ? "" : reason;
++        }
++        return changed;
++    }
++
++    public boolean isCancelled() {
++        return this.cancelled.get();
++    }
++
++    public String reason() {
++        return this.reason;
++    }
++
++    public void throwIfCancelled() {
++        if (this.isCancelled()) {
++            throw new ComputeTaskCancelledException(this.reason);
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeDiagnostics.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeDiagnostics.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..44e6e793ac5014cda1859d74a79073600babb903
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeDiagnostics.java
+@@ -0,0 +1,115 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.util.Arrays;
++import java.util.EnumMap;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicLong;
++
++final class ComputeDiagnostics {
++
++    private final EnumMap<ComputeTaskType, TypeStats> stats = new EnumMap<>(ComputeTaskType.class);
++
++    ComputeDiagnostics() {
++        for (final ComputeTaskType type : ComputeTaskType.values()) {
++            this.stats.put(type, new TypeStats(type));
++        }
++    }
++
++    void submitted(final ComputeTaskType type) {
++        this.stats.get(type).submitted.incrementAndGet();
++    }
++
++    void queued(final ComputeTaskType type) {
++        this.stats.get(type).queued.incrementAndGet();
++    }
++
++    void rejected(final ComputeTaskType type) {
++        this.stats.get(type).rejected.incrementAndGet();
++    }
++
++    void running(final ComputeTaskType type) {
++        this.stats.get(type).running.incrementAndGet();
++    }
++
++    void stoppedRunning(final ComputeTaskType type) {
++        this.stats.get(type).running.decrementAndGet();
++    }
++
++    void completed(final ComputeTaskType type, final long queueNanos, final long computeNanos) {
++        final TypeStats stats = this.stats.get(type);
++        stats.completed.incrementAndGet();
++        stats.queueObservations.incrementAndGet();
++        stats.totalQueueNanos.addAndGet(Math.max(0L, queueNanos));
++        stats.computeObservations.incrementAndGet();
++        stats.totalComputeNanos.addAndGet(Math.max(0L, computeNanos));
++    }
++
++    void applied(final ComputeTaskType type, final long applyDelayNanos) {
++        final TypeStats stats = this.stats.get(type);
++        stats.applied.incrementAndGet();
++        stats.applyDelayObservations.incrementAndGet();
++        stats.totalApplyDelayNanos.addAndGet(Math.max(0L, applyDelayNanos));
++    }
++
++    void stale(final ComputeTaskType type) {
++        this.stats.get(type).stale.incrementAndGet();
++    }
++
++    void cancelled(final ComputeTaskType type) {
++        this.stats.get(type).cancelled.incrementAndGet();
++    }
++
++    void failed(final ComputeTaskType type) {
++        this.stats.get(type).failed.incrementAndGet();
++    }
++
++    List<ComputeTaskTypeSnapshot> snapshot() {
++        return Arrays.stream(ComputeTaskType.values()).map(type -> this.stats.get(type).snapshot()).toList();
++    }
++
++    private static final class TypeStats {
++
++        private final ComputeTaskType type;
++        private final AtomicLong submitted = new AtomicLong();
++        private final AtomicLong queued = new AtomicLong();
++        private final AtomicLong running = new AtomicLong();
++        private final AtomicLong completed = new AtomicLong();
++        private final AtomicLong applied = new AtomicLong();
++        private final AtomicLong stale = new AtomicLong();
++        private final AtomicLong cancelled = new AtomicLong();
++        private final AtomicLong failed = new AtomicLong();
++        private final AtomicLong rejected = new AtomicLong();
++        private final AtomicLong queueObservations = new AtomicLong();
++        private final AtomicLong computeObservations = new AtomicLong();
++        private final AtomicLong applyDelayObservations = new AtomicLong();
++        private final AtomicLong totalQueueNanos = new AtomicLong();
++        private final AtomicLong totalComputeNanos = new AtomicLong();
++        private final AtomicLong totalApplyDelayNanos = new AtomicLong();
++
++        private TypeStats(final ComputeTaskType type) {
++            this.type = type;
++        }
++
++        private ComputeTaskTypeSnapshot snapshot() {
++            return new ComputeTaskTypeSnapshot(
++                this.type,
++                this.submitted.get(),
++                this.queued.get(),
++                this.running.get(),
++                this.completed.get(),
++                this.applied.get(),
++                this.stale.get(),
++                this.cancelled.get(),
++                this.failed.get(),
++                this.rejected.get(),
++                averageMillis(this.totalQueueNanos.get(), this.queueObservations.get()),
++                averageMillis(this.totalComputeNanos.get(), this.computeObservations.get()),
++                averageMillis(this.totalApplyDelayNanos.get(), this.applyDelayObservations.get())
++            );
++        }
++
++        private static double averageMillis(final long nanos, final long observations) {
++            return observations == 0L ? 0.0D : (nanos / 1_000_000.0D) / observations;
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeGeneration.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeGeneration.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..51c32c7365b706c427d9e09ca6bfd768c614d8d5
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeGeneration.java
+@@ -0,0 +1,12 @@
++package io.papermc.paper.fucktick.compute;
++
++public record ComputeGeneration(long value) {
++
++    public static ComputeGeneration zero() {
++        return new ComputeGeneration(0L);
++    }
++
++    public static ComputeGeneration of(final long value) {
++        return new ComputeGeneration(value);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputePriority.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputePriority.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9829fdbe79a6cd012ecba2f4c5d7f8a8e1244e34
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputePriority.java
+@@ -0,0 +1,23 @@
++package io.papermc.paper.fucktick.compute;
++
++public enum ComputePriority {
++    CRITICAL_SAVE(0),
++    HIGH_ENTITY_AI(1),
++    NORMAL_WORLD_COMPUTE(2),
++    LOW_DIAGNOSTICS(3),
++    BACKGROUND_WARMUP(4);
++
++    private final int rank;
++
++    ComputePriority(final int rank) {
++        this.rank = rank;
++    }
++
++    public int rank() {
++        return this.rank;
++    }
++
++    public boolean outranks(final ComputePriority other) {
++        return this.rank < other.rank;
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeResult.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b1f3ee49c412e8ee8f01cb0703f63f2b73589754
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeResult.java
+@@ -0,0 +1,6 @@
++package io.papermc.paper.fucktick.compute;
++
++public interface ComputeResult {
++
++    ComputeGeneration generation();
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0636a65b667ed80ea299eb92ffb52c82b3b856c4
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeSnapshot.java
+@@ -0,0 +1,6 @@
++package io.papermc.paper.fucktick.compute;
++
++public interface ComputeSnapshot {
++
++    ComputeGeneration generation();
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTask.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTask.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..604da0445718009f2a19161d9518d0ccfcdbbbad
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTask.java
+@@ -0,0 +1,102 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.atomic.AtomicReference;
++
++final class ComputeTask<S extends ComputeSnapshot, R extends ComputeResult> implements Comparable<ComputeTask<?, ?>> {
++
++    final long id;
++    final long sequence;
++    final ComputeTaskType type;
++    final ComputePriority priority;
++    final ComputeTaskOwner owner;
++    final ComputeGeneration generation;
++    final String description;
++    final S snapshot;
++    final ComputeWorkload<S, R> workload;
++    final ComputeApplyExecutor applyExecutor;
++    final ComputeApplyHandle<R> applyHandle;
++    final ComputeCancellationToken cancellationToken = new ComputeCancellationToken();
++    final CompletableFuture<ComputeTaskState> completion = new CompletableFuture<>();
++    final long submittedNanos = System.nanoTime();
++    final AtomicReference<ComputeTaskState> state = new AtomicReference<>(ComputeTaskState.SUBMITTED);
++    volatile long queuedNanos = -1L;
++    volatile long runningNanos = -1L;
++    volatile long computeFinishedNanos = -1L;
++    volatile long applyScheduledNanos = -1L;
++    volatile long terminalNanos = -1L;
++    volatile String workerThread = "";
++    volatile String applyThread = "";
++    volatile String failureMessage = "";
++
++    ComputeTask(
++        final long id,
++        final long sequence,
++        final ComputeTaskType type,
++        final ComputePriority priority,
++        final ComputeTaskOwner owner,
++        final String description,
++        final S snapshot,
++        final ComputeWorkload<S, R> workload,
++        final ComputeApplyExecutor applyExecutor,
++        final ComputeApplyHandle<R> applyHandle
++    ) {
++        this.id = id;
++        this.sequence = sequence;
++        this.type = type;
++        this.priority = priority;
++        this.owner = owner;
++        this.description = description;
++        this.snapshot = snapshot;
++        this.generation = snapshot.generation();
++        this.workload = workload;
++        this.applyExecutor = applyExecutor;
++        this.applyHandle = applyHandle;
++    }
++
++    void transition(final ComputeTaskState state) {
++        this.state.set(state);
++        if (state.isTerminal()) {
++            this.terminalNanos = System.nanoTime();
++            this.completion.complete(state);
++        }
++    }
++
++    ComputeTaskSnapshot snapshot() {
++        final long now = System.nanoTime();
++        return new ComputeTaskSnapshot(
++            this.id,
++            this.type,
++            this.priority,
++            this.state.get(),
++            this.owner,
++            this.generation,
++            this.description,
++            this.workerThread,
++            this.applyThread,
++            elapsedMillis(this.queuedNanos, this.runningNanos > 0L ? this.runningNanos : now),
++            elapsedMillis(this.runningNanos, this.computeFinishedNanos > 0L ? this.computeFinishedNanos : now),
++            elapsedMillis(this.computeFinishedNanos, this.applyScheduledNanos > 0L ? this.applyScheduledNanos : now),
++            this.cancellationToken.isCancelled(),
++            this.cancellationToken.reason(),
++            this.failureMessage
++        );
++    }
++
++    boolean isTerminal() {
++        return this.state.get().isTerminal();
++    }
++
++    @Override
++    public int compareTo(final ComputeTask<?, ?> other) {
++        final int priorityCompare = Integer.compare(this.priority.rank(), other.priority.rank());
++        return priorityCompare != 0 ? priorityCompare : Long.compare(this.sequence, other.sequence);
++    }
++
++    private static long elapsedMillis(final long startNanos, final long endNanos) {
++        if (startNanos <= 0L || endNanos <= 0L || endNanos < startNanos) {
++            return -1L;
++        }
++        return (endNanos - startNanos) / 1_000_000L;
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskCancelledException.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskCancelledException.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa7d122f9a49c74225f652f286f5753d90aa4c7c
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskCancelledException.java
+@@ -0,0 +1,8 @@
++package io.papermc.paper.fucktick.compute;
++
++public final class ComputeTaskCancelledException extends RuntimeException {
++
++    public ComputeTaskCancelledException(final String reason) {
++        super(reason == null || reason.isBlank() ? "Compute task cancelled" : "Compute task cancelled: " + reason);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskHandle.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskHandle.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9747f1c0436fdd38a01d638eec4c407b26801163
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskHandle.java
+@@ -0,0 +1,44 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Supplier;
++
++public final class ComputeTaskHandle<R extends ComputeResult> {
++
++    private final long taskId;
++    private final ComputeCancellationToken cancellationToken;
++    private final CompletableFuture<ComputeTaskState> completion;
++    private final Supplier<ComputeTaskSnapshot> snapshotSupplier;
++
++    ComputeTaskHandle(
++        final long taskId,
++        final ComputeCancellationToken cancellationToken,
++        final CompletableFuture<ComputeTaskState> completion,
++        final Supplier<ComputeTaskSnapshot> snapshotSupplier
++    ) {
++        this.taskId = taskId;
++        this.cancellationToken = cancellationToken;
++        this.completion = completion;
++        this.snapshotSupplier = snapshotSupplier;
++    }
++
++    public long taskId() {
++        return this.taskId;
++    }
++
++    public boolean cancel(final String reason) {
++        return this.cancellationToken.cancel(reason);
++    }
++
++    public boolean isCancelled() {
++        return this.cancellationToken.isCancelled();
++    }
++
++    public CompletableFuture<ComputeTaskState> completion() {
++        return this.completion;
++    }
++
++    public ComputeTaskSnapshot snapshot() {
++        return this.snapshotSupplier.get();
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskOwner.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskOwner.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf89430644e79a9ed2693c060b13e84bacbe1ae3
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskOwner.java
+@@ -0,0 +1,27 @@
++package io.papermc.paper.fucktick.compute;
++
++public record ComputeTaskOwner(String worldName, String pluginName) {
++
++    public static final ComputeTaskOwner SERVER = new ComputeTaskOwner(null, null);
++
++    public boolean hasWorld() {
++        return this.worldName != null && !this.worldName.isBlank();
++    }
++
++    public boolean hasPlugin() {
++        return this.pluginName != null && !this.pluginName.isBlank();
++    }
++
++    public String displayName() {
++        if (this.hasWorld() && this.hasPlugin()) {
++            return "world=" + this.worldName + " plugin=" + this.pluginName;
++        }
++        if (this.hasWorld()) {
++            return "world=" + this.worldName;
++        }
++        if (this.hasPlugin()) {
++            return "plugin=" + this.pluginName;
++        }
++        return "server";
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e8a7dff653deae22bcb7205ca8c6d447f75ef9f
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskSnapshot.java
+@@ -0,0 +1,20 @@
++package io.papermc.paper.fucktick.compute;
++
++public record ComputeTaskSnapshot(
++    long id,
++    ComputeTaskType type,
++    ComputePriority priority,
++    ComputeTaskState state,
++    ComputeTaskOwner owner,
++    ComputeGeneration generation,
++    String description,
++    String workerThread,
++    String applyThread,
++    long queueTimeMs,
++    long computeTimeMs,
++    long applyDelayMs,
++    boolean cancelled,
++    String cancellationReason,
++    String failureMessage
++) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskState.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskState.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..229a6d91bfb88abd477089504ad2f0c94781d51e
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskState.java
+@@ -0,0 +1,25 @@
++package io.papermc.paper.fucktick.compute;
++
++public enum ComputeTaskState {
++    SUBMITTED(false),
++    SNAPSHOTTED(false),
++    QUEUED(false),
++    RUNNING(false),
++    COMPLETED(false),
++    APPLY_SCHEDULED(false),
++    APPLIED(true),
++    STALE(true),
++    CANCELLED(true),
++    FAILED(true),
++    REJECTED(true);
++
++    private final boolean terminal;
++
++    ComputeTaskState(final boolean terminal) {
++        this.terminal = terminal;
++    }
++
++    public boolean isTerminal() {
++        return this.terminal;
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskType.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskType.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbaf7464cdf12961a591d24f17c15a45fbf0aef7
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskType.java
+@@ -0,0 +1,11 @@
++package io.papermc.paper.fucktick.compute;
++
++public enum ComputeTaskType {
++    PATHFINDING,
++    EXPLOSION_PRECOMPUTE,
++    CHUNK_SAVE_SERIALIZE,
++    SCOREBOARD_RENDER,
++    DIAGNOSTIC_FORMAT,
++    ROUTING_METADATA_WARMUP,
++    GENERIC
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskTypeSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskTypeSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfa78cbb2d121badee60a6ff0dbddd2fd10cacca
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskTypeSnapshot.java
+@@ -0,0 +1,18 @@
++package io.papermc.paper.fucktick.compute;
++
++public record ComputeTaskTypeSnapshot(
++    ComputeTaskType type,
++    long submitted,
++    long queued,
++    long running,
++    long completed,
++    long applied,
++    long stale,
++    long cancelled,
++    long failed,
++    long rejected,
++    double averageQueueTimeMs,
++    double averageComputeTimeMs,
++    double averageApplyDelayMs
++) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerPool.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerPool.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b87581297fe90e5740702bbea39d4a349a8de00
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerPool.java
+@@ -0,0 +1,140 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.PriorityBlockingQueue;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++
++final class ComputeWorkerPool {
++
++    private final FuckTickComputeBroker broker;
++    private final ComputeBudgetPolicy policy;
++    private final PriorityBlockingQueue<ComputeTask<?, ?>> queue = new PriorityBlockingQueue<>();
++    private final List<Thread> workers = new ArrayList<>();
++    private final ConcurrentHashMap<String, Long> workerTasks = new ConcurrentHashMap<>();
++    private final AtomicInteger queuedTasks = new AtomicInteger();
++    private final AtomicBoolean shutdown = new AtomicBoolean();
++
++    ComputeWorkerPool(final FuckTickComputeBroker broker, final ComputeBudgetPolicy policy) {
++        this.broker = broker;
++        this.policy = policy;
++        for (int i = 1; i <= policy.workerCount(); ++i) {
++            final Thread thread = new Thread(this::runWorker, "FuckTick Compute Worker - " + i);
++            thread.setDaemon(true);
++            this.workers.add(thread);
++        }
++    }
++
++    void start() {
++        for (final Thread worker : this.workers) {
++            worker.start();
++        }
++    }
++
++    boolean execute(final ComputeTask<?, ?> task) {
++        if (this.shutdown.get()) {
++            return false;
++        }
++        if (!this.reserveQueueSlot(task)) {
++            return false;
++        }
++        task.queuedNanos = System.nanoTime();
++        task.transition(ComputeTaskState.QUEUED);
++        this.queue.offer(task);
++        return true;
++    }
++
++    int queuedTasks() {
++        return this.queuedTasks.get();
++    }
++
++    List<ComputeWorkerSnapshot> snapshotWorkers() {
++        return this.workers.stream()
++            .map(worker -> new ComputeWorkerSnapshot(worker.getName(), worker.isAlive(), this.workerTasks.get(worker.getName())))
++            .toList();
++    }
++
++    void shutdown(final long waitMs) {
++        if (!this.shutdown.compareAndSet(false, true)) {
++            return;
++        }
++        for (final Thread worker : this.workers) {
++            worker.interrupt();
++        }
++        final List<ComputeTask<?, ?>> drained = new ArrayList<>();
++        this.queue.drainTo(drained);
++        this.queuedTasks.addAndGet(-drained.size());
++        for (final ComputeTask<?, ?> task : drained) {
++            task.cancellationToken.cancel("Compute broker shutdown");
++            this.broker.finishWithoutRunning(task, ComputeTaskState.CANCELLED, "");
++        }
++        final long deadline = System.currentTimeMillis() + waitMs;
++        for (final Thread worker : this.workers) {
++            final long remaining = Math.max(1L, deadline - System.currentTimeMillis());
++            try {
++                worker.join(remaining);
++            } catch (final InterruptedException ex) {
++                Thread.currentThread().interrupt();
++                return;
++            }
++        }
++    }
++
++    boolean isShutdown() {
++        return this.shutdown.get();
++    }
++
++    private boolean reserveQueueSlot(final ComputeTask<?, ?> task) {
++        for (;;) {
++            final int current = this.queuedTasks.get();
++            if (current < this.policy.maxQueuedComputeTasks()) {
++                if (this.queuedTasks.compareAndSet(current, current + 1)) {
++                    return true;
++                }
++                continue;
++            }
++            if (this.displaceLowerPriorityTask(task)) {
++                continue;
++            }
++            return false;
++        }
++    }
++
++    private boolean displaceLowerPriorityTask(final ComputeTask<?, ?> incoming) {
++        final ComputeTask<?, ?> candidate = this.queue.stream()
++            .filter(task -> incoming.priority.outranks(task.priority))
++            .max(Comparator.comparingInt(task -> task.priority.rank()))
++            .orElse(null);
++        if (candidate == null || !this.queue.remove(candidate)) {
++            return false;
++        }
++        this.queuedTasks.decrementAndGet();
++        candidate.cancellationToken.cancel("Displaced by higher priority compute task " + incoming.id);
++        this.broker.finishWithoutRunning(candidate, ComputeTaskState.REJECTED, "Displaced by higher priority compute task " + incoming.id);
++        return true;
++    }
++
++    private void runWorker() {
++        while (!this.shutdown.get()) {
++            final ComputeTask<?, ?> task;
++            try {
++                task = this.queue.take();
++            } catch (final InterruptedException ex) {
++                if (this.shutdown.get()) {
++                    return;
++                }
++                continue;
++            }
++            this.queuedTasks.decrementAndGet();
++            this.workerTasks.put(Thread.currentThread().getName(), task.id);
++            try {
++                this.broker.runTask(task);
++            } finally {
++                this.workerTasks.remove(Thread.currentThread().getName(), task.id);
++            }
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b9f145110b046c0501603edfccade3ee28cedc9
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkerSnapshot.java
+@@ -0,0 +1,4 @@
++package io.papermc.paper.fucktick.compute;
++
++public record ComputeWorkerSnapshot(String name, boolean alive, Long taskId) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkload.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkload.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2b57edc15fa6324a5af353721d16ff4a0b92858
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeWorkload.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.fucktick.compute;
++
++@FunctionalInterface
++public interface ComputeWorkload<S extends ComputeSnapshot, R extends ComputeResult> {
++
++    R compute(S snapshot, ComputeCancellationToken cancellationToken) throws Exception;
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..47ba3769dfc22be3be0f5759c43d96ec17872d7d
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
+@@ -0,0 +1,413 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.EnumMap;
++import java.util.List;
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentLinkedDeque;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicLong;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.BooleanSupplier;
++import java.util.function.Supplier;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++public final class FuckTickComputeBroker {
++
++    private static final Logger LOGGER = LoggerFactory.getLogger(FuckTickComputeBroker.class);
++    private static final AtomicReference<FuckTickComputeBroker> INSTANCE = new AtomicReference<>();
++
++    private final ComputeBudgetPolicy policy;
++    private final ComputeDiagnostics diagnostics = new ComputeDiagnostics();
++    private final ComputeWorkerPool workerPool;
++    private final AtomicLong taskIds = new AtomicLong();
++    private final AtomicLong sequences = new AtomicLong();
++    private final ConcurrentHashMap<Long, ComputeTask<?, ?>> tasks = new ConcurrentHashMap<>();
++    private final ConcurrentLinkedDeque<Long> taskOrder = new ConcurrentLinkedDeque<>();
++    private final AtomicInteger trackedTasks = new AtomicInteger();
++    private final EnumMap<ComputeTaskType, AtomicInteger> inFlightByType = new EnumMap<>(ComputeTaskType.class);
++    private final ConcurrentHashMap<String, AtomicInteger> inFlightByWorld = new ConcurrentHashMap<>();
++    private final ConcurrentHashMap<String, AtomicInteger> inFlightByPlugin = new ConcurrentHashMap<>();
++
++    public static FuckTickComputeBroker instance() {
++        final FuckTickComputeBroker current = INSTANCE.get();
++        if (current != null) {
++            return current;
++        }
++        final FuckTickComputeBroker created = new FuckTickComputeBroker(ComputeBudgetPolicy.fromSystemProperties());
++        if (INSTANCE.compareAndSet(null, created)) {
++            return created;
++        }
++        created.shutdown();
++        return INSTANCE.get();
++    }
++
++    public static void shutdownIfInitialized() {
++        final FuckTickComputeBroker current = INSTANCE.get();
++        if (current != null) {
++            current.shutdown();
++        }
++    }
++
++    static FuckTickComputeBroker createForTesting(final ComputeBudgetPolicy policy) {
++        return new FuckTickComputeBroker(policy);
++    }
++
++    private FuckTickComputeBroker(final ComputeBudgetPolicy policy) {
++        this.policy = policy;
++        for (final ComputeTaskType type : ComputeTaskType.values()) {
++            this.inFlightByType.put(type, new AtomicInteger());
++        }
++        this.workerPool = new ComputeWorkerPool(this, policy);
++        this.workerPool.start();
++    }
++
++    public <S extends ComputeSnapshot> S snapshot(
++        final ComputeTaskType type,
++        final String ownerContext,
++        final BooleanSupplier ownerThreadCheck,
++        final Supplier<S> snapshotSupplier
++    ) {
++        Objects.requireNonNull(type, "type");
++        Objects.requireNonNull(ownerThreadCheck, "ownerThreadCheck");
++        Objects.requireNonNull(snapshotSupplier, "snapshotSupplier");
++        if (FuckTickComputeContext.isComputeWorker()) {
++            throw new IllegalStateException("Compute task " + FuckTickComputeContext.currentTaskType() + " attempted to create a live snapshot from a compute worker.");
++        }
++        if (!ownerThreadCheck.getAsBoolean()) {
++            throw new IllegalStateException("Compute snapshot for " + type + " was requested outside owner context " + ownerContext + ".");
++        }
++        final S snapshot = Objects.requireNonNull(snapshotSupplier.get(), "snapshot");
++        FuckTickComputeThreadChecks.requireImmutableSnapshot(snapshot);
++        return snapshot;
++    }
++
++    public <S extends ComputeSnapshot, R extends ComputeResult> ComputeTaskHandle<R> submit(
++        final ComputeTaskType type,
++        final ComputePriority priority,
++        final ComputeTaskOwner owner,
++        final String description,
++        final S snapshot,
++        final ComputeWorkload<S, R> workload,
++        final ComputeApplyExecutor applyExecutor,
++        final ComputeApplyHandle<R> applyHandle
++    ) {
++        Objects.requireNonNull(type, "type");
++        Objects.requireNonNull(priority, "priority");
++        Objects.requireNonNull(owner, "owner");
++        Objects.requireNonNull(snapshot, "snapshot");
++        Objects.requireNonNull(workload, "workload");
++        Objects.requireNonNull(applyExecutor, "applyExecutor");
++        Objects.requireNonNull(applyHandle, "applyHandle");
++        this.diagnostics.submitted(type);
++        FuckTickComputeThreadChecks.requireImmutableSnapshot(snapshot);
++
++        final ComputeTask<S, R> task = new ComputeTask<>(
++            this.taskIds.incrementAndGet(),
++            this.sequences.incrementAndGet(),
++            type,
++            priority,
++            owner,
++            description == null || description.isBlank() ? type.name() : description,
++            snapshot,
++            workload,
++            applyExecutor,
++            applyHandle
++        );
++        this.track(task);
++        task.transition(ComputeTaskState.SNAPSHOTTED);
++
++        if (!this.reserveBudget(task)) {
++            this.rejectNewTask(task, "Compute task rejected by budget. type=" + type + " owner=" + owner.displayName());
++            return this.handle(task);
++        }
++        if (!this.workerPool.execute(task)) {
++            this.releaseBudget(task);
++            this.rejectNewTask(task, "Compute task rejected. queued=" + this.workerPool.queuedTasks() + " limit=" + this.policy.maxQueuedComputeTasks());
++            return this.handle(task);
++        }
++        this.diagnostics.queued(type);
++        return this.handle(task);
++    }
++
++    public ComputeBrokerSnapshot snapshot() {
++        final List<ComputeTaskSnapshot> taskSnapshots = this.tasks.values().stream()
++            .map(ComputeTask::snapshot)
++            .sorted(Comparator.comparingLong(ComputeTaskSnapshot::id).reversed())
++            .toList();
++        final int running = (int)taskSnapshots.stream().filter(task -> task.state() == ComputeTaskState.RUNNING).count();
++        return new ComputeBrokerSnapshot(
++            this.workerPool.isShutdown(),
++            this.policy.workerCount(),
++            this.workerPool.queuedTasks(),
++            running,
++            this.workerPool.snapshotWorkers(),
++            this.diagnostics.snapshot(),
++            taskSnapshots
++        );
++    }
++
++    public ComputeTaskSnapshot taskSnapshot(final long taskId) {
++        final ComputeTask<?, ?> task = this.tasks.get(taskId);
++        return task == null ? null : task.snapshot();
++    }
++
++    public void shutdown() {
++        this.workerPool.shutdown(this.policy.shutdownWaitMs());
++    }
++
++    <S extends ComputeSnapshot, R extends ComputeResult> void runTask(final ComputeTask<S, R> task) {
++        if (task.cancellationToken.isCancelled()) {
++            this.finishTask(task, ComputeTaskState.CANCELLED, "");
++            return;
++        }
++        task.workerThread = Thread.currentThread().getName();
++        task.runningNanos = System.nanoTime();
++        task.transition(ComputeTaskState.RUNNING);
++        this.diagnostics.running(task.type);
++        final R result;
++        try (FuckTickComputeContext.Scope ignored = FuckTickComputeContext.enter(task.id, task.type, task.priority, task.description)) {
++            result = Objects.requireNonNull(task.workload.compute(task.snapshot, task.cancellationToken), "compute result");
++        } catch (final ComputeTaskCancelledException ex) {
++            task.cancellationToken.cancel(ex.getMessage());
++            this.finishRunningTask(task, ComputeTaskState.CANCELLED, "");
++            return;
++        } catch (final Throwable throwable) {
++            if (this.workerPool.isShutdown() && throwable instanceof InterruptedException) {
++                Thread.currentThread().interrupt();
++                task.cancellationToken.cancel("Compute broker shutdown");
++                this.finishRunningTask(task, ComputeTaskState.CANCELLED, "");
++                return;
++            }
++            this.finishRunningTask(task, ComputeTaskState.FAILED, throwable.toString());
++            LOGGER.error("FuckTick compute task failed. id={} type={} description={}", task.id, task.type, task.description, throwable);
++            return;
++        }
++        task.computeFinishedNanos = System.nanoTime();
++        final long computeNanos = task.computeFinishedNanos - task.runningNanos;
++        this.diagnostics.completed(task.type, task.runningNanos - task.queuedNanos, computeNanos);
++        this.diagnostics.stoppedRunning(task.type);
++        if (computeNanos > this.policy.maxComputeTimeMs() * 1_000_000L) {
++            LOGGER.warn("FuckTick compute task exceeded compute budget. id={} type={} computeMs={} budgetMs={}", task.id, task.type, computeNanos / 1_000_000L, this.policy.maxComputeTimeMs());
++        }
++
++        if (task.cancellationToken.isCancelled()) {
++            this.finishTask(task, ComputeTaskState.CANCELLED, "");
++            return;
++        }
++        if (!task.generation.equals(result.generation()) || this.isPastApplyDeadline(task)) {
++            this.finishTask(task, ComputeTaskState.STALE, "");
++            return;
++        }
++        task.transition(ComputeTaskState.COMPLETED);
++        task.applyScheduledNanos = System.nanoTime();
++        task.transition(ComputeTaskState.APPLY_SCHEDULED);
++        try {
++            task.applyExecutor.execute(() -> this.runApply(task, result));
++        } catch (final Throwable throwable) {
++            this.finishTask(task, ComputeTaskState.FAILED, throwable.toString());
++            LOGGER.error("FuckTick compute apply scheduling failed. id={} type={} description={}", task.id, task.type, task.description, throwable);
++        }
++    }
++
++    void finishWithoutRunning(final ComputeTask<?, ?> task, final ComputeTaskState state, final String failureMessage) {
++        this.finishTask(task, state, failureMessage);
++    }
++
++    private <R extends ComputeResult> void runApply(final ComputeTask<?, R> task, final R result) {
++        task.applyThread = Thread.currentThread().getName();
++        final long applyStartNanos = System.nanoTime();
++        if (task.cancellationToken.isCancelled()) {
++            this.finishTask(task, ComputeTaskState.CANCELLED, "");
++            return;
++        }
++        if (!task.generation.equals(result.generation()) || this.isPastApplyDeadline(task)) {
++            this.finishTask(task, ComputeTaskState.STALE, "");
++            return;
++        }
++        try {
++            if (!task.applyExecutor.isOwnerThread()) {
++                throw new IllegalStateException("Compute task " + task.id + " apply did not run on owner context " + task.applyExecutor.ownerContext() + ".");
++            }
++            final ComputeApplyContext context = new ComputeApplyContext(task.id, task.type, task.owner, task.generation, task.cancellationToken);
++            final ComputeApplyDecision decision = Objects.requireNonNull(task.applyHandle.apply(context, result), "apply decision");
++            switch (decision) {
++                case APPLIED -> {
++                    this.diagnostics.applied(task.type, applyStartNanos - task.computeFinishedNanos);
++                    this.finishTask(task, ComputeTaskState.APPLIED, "");
++                }
++                case STALE -> this.finishTask(task, ComputeTaskState.STALE, "");
++                case CANCELLED -> {
++                    task.cancellationToken.cancel("Apply returned cancellation");
++                    this.finishTask(task, ComputeTaskState.CANCELLED, "");
++                }
++            }
++        } catch (final Throwable throwable) {
++            this.finishTask(task, ComputeTaskState.FAILED, throwable.toString());
++            LOGGER.error("FuckTick compute apply failed. id={} type={} description={}", task.id, task.type, task.description, throwable);
++        }
++    }
++
++    private void finishRunningTask(final ComputeTask<?, ?> task, final ComputeTaskState state, final String failureMessage) {
++        task.computeFinishedNanos = System.nanoTime();
++        this.diagnostics.stoppedRunning(task.type);
++        this.finishTask(task, state, failureMessage);
++    }
++
++    private void finishTask(final ComputeTask<?, ?> task, final ComputeTaskState state, final String failureMessage) {
++        if (task.isTerminal()) {
++            return;
++        }
++        task.failureMessage = failureMessage == null ? "" : failureMessage;
++        switch (state) {
++            case STALE -> this.diagnostics.stale(task.type);
++            case CANCELLED -> this.diagnostics.cancelled(task.type);
++            case FAILED -> this.diagnostics.failed(task.type);
++            case REJECTED -> this.diagnostics.rejected(task.type);
++            default -> {
++            }
++        }
++        task.transition(state);
++        this.releaseBudget(task);
++        this.evictTrackedTasks();
++    }
++
++    private void rejectNewTask(final ComputeTask<?, ?> task, final String reason) {
++        task.failureMessage = reason;
++        task.cancellationToken.cancel(reason);
++        task.transition(ComputeTaskState.REJECTED);
++        this.diagnostics.rejected(task.type);
++    }
++
++    private boolean reserveBudget(final ComputeTask<?, ?> task) {
++        if (!this.reserveType(task.type)) {
++            return false;
++        }
++        if (!this.reserve(task.owner.worldName(), this.inFlightByWorld, this.policy.maxQueuedComputeTasksPerWorld())) {
++            this.releaseType(task.type);
++            return false;
++        }
++        if (!this.reserve(task.owner.pluginName(), this.inFlightByPlugin, this.policy.maxQueuedComputeTasksPerPlugin())) {
++            this.release(task.owner.worldName(), this.inFlightByWorld);
++            this.releaseType(task.type);
++            return false;
++        }
++        return true;
++    }
++
++    private void releaseBudget(final ComputeTask<?, ?> task) {
++        this.releaseType(task.type);
++        this.release(task.owner.worldName(), this.inFlightByWorld);
++        this.release(task.owner.pluginName(), this.inFlightByPlugin);
++    }
++
++    private boolean reserveType(final ComputeTaskType type) {
++        final int limit = this.typeLimit(type);
++        if (limit <= 0) {
++            return true;
++        }
++        final AtomicInteger counter = this.inFlightByType.get(type);
++        for (;;) {
++            final int current = counter.get();
++            if (current >= limit) {
++                return false;
++            }
++            if (counter.compareAndSet(current, current + 1)) {
++                return true;
++            }
++        }
++    }
++
++    private void releaseType(final ComputeTaskType type) {
++        final AtomicInteger counter = this.inFlightByType.get(type);
++        if (counter != null) {
++            counter.updateAndGet(value -> Math.max(0, value - 1));
++        }
++    }
++
++    private int typeLimit(final ComputeTaskType type) {
++        return switch (type) {
++            case PATHFINDING -> this.policy.maxPathfindingTasksPerTick();
++            case EXPLOSION_PRECOMPUTE -> this.policy.maxExplosionPrecomputeTasksPerTick();
++            case CHUNK_SAVE_SERIALIZE -> this.policy.maxChunkSerializationTasks();
++            default -> 0;
++        };
++    }
++
++    private boolean reserve(final String key, final ConcurrentHashMap<String, AtomicInteger> counters, final int limit) {
++        if (key == null || key.isBlank()) {
++            return true;
++        }
++        final AtomicInteger counter = counters.computeIfAbsent(key, ignored -> new AtomicInteger());
++        for (;;) {
++            final int current = counter.get();
++            if (current >= limit) {
++                return false;
++            }
++            if (counter.compareAndSet(current, current + 1)) {
++                return true;
++            }
++        }
++    }
++
++    private void release(final String key, final ConcurrentHashMap<String, AtomicInteger> counters) {
++        if (key == null || key.isBlank()) {
++            return;
++        }
++        final AtomicInteger counter = counters.get(key);
++        if (counter == null) {
++            return;
++        }
++        final int remaining = counter.decrementAndGet();
++        if (remaining <= 0) {
++            counters.remove(key, counter);
++        }
++    }
++
++    private boolean isPastApplyDeadline(final ComputeTask<?, ?> task) {
++        return System.nanoTime() - task.submittedNanos > this.policy.maxApplyDelayMs() * 1_000_000L;
++    }
++
++    private <R extends ComputeResult> ComputeTaskHandle<R> handle(final ComputeTask<?, R> task) {
++        return new ComputeTaskHandle<>(task.id, task.cancellationToken, task.completion, task::snapshot);
++    }
++
++    private void track(final ComputeTask<?, ?> task) {
++        this.tasks.put(task.id, task);
++        this.taskOrder.add(task.id);
++        this.trackedTasks.incrementAndGet();
++        this.evictTrackedTasks();
++    }
++
++    private void evictTrackedTasks() {
++        final List<Long> deferred = new ArrayList<>();
++        try {
++            while (this.trackedTasks.get() > this.policy.maxTrackedTasks()) {
++                final Long id = this.taskOrder.poll();
++                if (id == null) {
++                    return;
++                }
++                final ComputeTask<?, ?> task = this.tasks.get(id);
++                if (task == null) {
++                    this.trackedTasks.decrementAndGet();
++                    continue;
++                }
++                if (!task.isTerminal()) {
++                    deferred.add(id);
++                    break;
++                }
++                if (this.tasks.remove(id, task)) {
++                    this.trackedTasks.decrementAndGet();
++                }
++            }
++        } finally {
++            for (final Long id : deferred) {
++                this.taskOrder.add(id);
++            }
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeContext.java b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeContext.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..32755aca3663df5e0ab4adf39a61b45f9db54e74
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeContext.java
+@@ -0,0 +1,55 @@
++package io.papermc.paper.fucktick.compute;
++
++public final class FuckTickComputeContext {
++
++    private static final ThreadLocal<Context> CURRENT = new ThreadLocal<>();
++
++    private FuckTickComputeContext() {
++    }
++
++    static Scope enter(final long taskId, final ComputeTaskType type, final ComputePriority priority, final String description) {
++        final Context previous = CURRENT.get();
++        CURRENT.set(new Context(taskId, type, priority, description));
++        return () -> {
++            if (previous == null) {
++                CURRENT.remove();
++            } else {
++                CURRENT.set(previous);
++            }
++        };
++    }
++
++    public static boolean isComputeWorker() {
++        return CURRENT.get() != null;
++    }
++
++    public static long currentTaskId() {
++        final Context context = CURRENT.get();
++        return context == null ? -1L : context.taskId;
++    }
++
++    public static ComputeTaskType currentTaskType() {
++        final Context context = CURRENT.get();
++        return context == null ? null : context.type;
++    }
++
++    public static ComputePriority currentPriority() {
++        final Context context = CURRENT.get();
++        return context == null ? null : context.priority;
++    }
++
++    public static String currentDescription() {
++        final Context context = CURRENT.get();
++        return context == null ? "" : context.description;
++    }
++
++    @FunctionalInterface
++    interface Scope extends AutoCloseable {
++
++        @Override
++        void close();
++    }
++
++    private record Context(long taskId, ComputeTaskType type, ComputePriority priority, String description) {
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeThreadChecks.java b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeThreadChecks.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dcd0653589146a99d96a64ae5f98befb03e46862
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeThreadChecks.java
+@@ -0,0 +1,85 @@
++package io.papermc.paper.fucktick.compute;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.Modifier;
++import java.util.Collection;
++import java.util.Map;
++import java.util.Optional;
++
++public final class FuckTickComputeThreadChecks {
++
++    private static final String[] FORBIDDEN_LIVE_PREFIXES = {
++        "org.bukkit.World",
++        "org.bukkit.Chunk",
++        "org.bukkit.block.Block",
++        "org.bukkit.block.BlockState",
++        "org.bukkit.entity.Entity",
++        "org.bukkit.entity.Player",
++        "net.minecraft.world.level.Level",
++        "net.minecraft.world.level.chunk.ChunkAccess",
++        "net.minecraft.world.entity.Entity",
++        "net.minecraft.server.level.ServerLevel",
++        "net.minecraft.server.level.ServerPlayer"
++    };
++
++    private FuckTickComputeThreadChecks() {
++    }
++
++    public static void requireNotOwnerAccess() {
++        requireNotOwnerAccess("live world state");
++    }
++
++    public static void requireNotOwnerAccess(final String attemptedAccess) {
++        if (!FuckTickComputeContext.isComputeWorker()) {
++            return;
++        }
++        final ComputeTaskType type = FuckTickComputeContext.currentTaskType();
++        throw new IllegalStateException("Compute task " + type + " attempted to access " + attemptedAccess + " from a compute worker. Use owner-thread snapshot data and schedule validated apply instead.");
++    }
++
++    public static void requireImmutableSnapshot(final ComputeSnapshot snapshot) {
++        if (snapshot == null) {
++            throw new IllegalArgumentException("Compute snapshot cannot be null.");
++        }
++        inspectSnapshotClass(snapshot.getClass());
++    }
++
++    private static void inspectSnapshotClass(final Class<?> snapshotClass) {
++        for (final Field field : snapshotClass.getDeclaredFields()) {
++            if (Modifier.isStatic(field.getModifiers())) {
++                continue;
++            }
++            final Class<?> type = field.getType();
++            if (isForbiddenLiveType(type)) {
++                throw new IllegalArgumentException("Compute snapshot " + snapshotClass.getName() + " contains live owner-bound field " + field.getName() + " of type " + type.getName() + ".");
++            }
++            if (!isKnownImmutableContainer(type) && !Modifier.isFinal(field.getModifiers()) && !snapshotClass.isRecord()) {
++                throw new IllegalArgumentException("Compute snapshot " + snapshotClass.getName() + " must keep field " + field.getName() + " immutable.");
++            }
++        }
++    }
++
++    private static boolean isKnownImmutableContainer(final Class<?> type) {
++        return type.isPrimitive()
++            || type.isEnum()
++            || type == String.class
++            || Number.class.isAssignableFrom(type)
++            || type == Boolean.class
++            || type == Character.class
++            || type == java.util.UUID.class
++            || type == ComputeGeneration.class
++            || Collection.class.isAssignableFrom(type)
++            || Map.class.isAssignableFrom(type)
++            || Optional.class.isAssignableFrom(type);
++    }
++
++    private static boolean isForbiddenLiveType(final Class<?> type) {
++        final String name = type.getName();
++        for (final String forbidden : FORBIDDEN_LIVE_PREFIXES) {
++            if (name.equals(forbidden) || name.startsWith(forbidden + "$")) {
++                return true;
++            }
++        }
++        return false;
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/AffectedBlockSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/AffectedBlockSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1831daf9d27b02adca9ad98e23fc74621dc77037
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/AffectedBlockSnapshot.java
+@@ -0,0 +1,4 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++public record AffectedBlockSnapshot(int x, int y, int z, String blockKey) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/BlockCollisionComputeSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/BlockCollisionComputeSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ac4b7e1f40492aaa79db3eda308015065fd8b12
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/BlockCollisionComputeSnapshot.java
+@@ -0,0 +1,11 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++public record BlockCollisionComputeSnapshot(
++    int x,
++    int y,
++    int z,
++    String blockKey,
++    boolean solid,
++    float explosionResistance
++) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSavePayloadResult.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSavePayloadResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a6d6e736c19616d0819331664b0cf700f31bcfd
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSavePayloadResult.java
+@@ -0,0 +1,23 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++
++public record ChunkSavePayloadResult(
++    ComputeGeneration generation,
++    String worldName,
++    int chunkX,
++    int chunkZ,
++    byte[] compressedPayload,
++    String checksum
++) implements ComputeResult {
++
++    public ChunkSavePayloadResult {
++        compressedPayload = compressedPayload == null ? new byte[0] : compressedPayload.clone();
++    }
++
++    @Override
++    public byte[] compressedPayload() {
++        return this.compressedPayload.clone();
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSaveSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSaveSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f494e3d119201b387edef0e2ae47cdc0ea241668
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSaveSnapshot.java
+@@ -0,0 +1,23 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeSnapshot;
++
++public record ChunkSaveSnapshot(
++    ComputeGeneration generation,
++    String worldName,
++    int chunkX,
++    int chunkZ,
++    byte[] uncompressedPayload,
++    long regionTick
++) implements ComputeSnapshot {
++
++    public ChunkSaveSnapshot {
++        uncompressedPayload = uncompressedPayload == null ? new byte[0] : uncompressedPayload.clone();
++    }
++
++    @Override
++    public byte[] uncompressedPayload() {
++        return this.uncompressedPayload.clone();
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/DiagnosticFormattingResult.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/DiagnosticFormattingResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6f77673f481de94d01bcbe8d8912ec793112db1
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/DiagnosticFormattingResult.java
+@@ -0,0 +1,11 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++
++public record DiagnosticFormattingResult(
++    ComputeGeneration generation,
++    String reportName,
++    String formattedText
++) implements ComputeResult {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/DiagnosticFormattingSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/DiagnosticFormattingSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c12326e9b7c95ec274ac9b9517bf18ad4843b33
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/DiagnosticFormattingSnapshot.java
+@@ -0,0 +1,19 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeSnapshot;
++import java.util.List;
++import java.util.Map;
++
++public record DiagnosticFormattingSnapshot(
++    ComputeGeneration generation,
++    String reportName,
++    Map<String, String> counters,
++    List<String> sections
++) implements ComputeSnapshot {
++
++    public DiagnosticFormattingSnapshot {
++        counters = counters == null ? Map.of() : Map.copyOf(counters);
++        sections = sections == null ? List.of() : List.copyOf(sections);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/EntityPathfindingSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/EntityPathfindingSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..65f639ed259c85982c9dedb035316135dc829085
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/EntityPathfindingSnapshot.java
+@@ -0,0 +1,21 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeSnapshot;
++import java.util.List;
++import java.util.UUID;
++
++public record EntityPathfindingSnapshot(
++    ComputeGeneration generation,
++    UUID entityId,
++    String worldName,
++    LocationComputeSnapshot currentPosition,
++    LocationComputeSnapshot targetPosition,
++    List<BlockCollisionComputeSnapshot> nearbyCollision,
++    long regionTick
++) implements ComputeSnapshot {
++
++    public EntityPathfindingSnapshot {
++        nearbyCollision = nearbyCollision == null ? List.of() : List.copyOf(nearbyCollision);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/ExplosionPlanResult.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/ExplosionPlanResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..df2c9464b68520ea9d0e613436e682d1f080baf7
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/ExplosionPlanResult.java
+@@ -0,0 +1,20 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++import java.util.List;
++import java.util.UUID;
++
++public record ExplosionPlanResult(
++    ComputeGeneration generation,
++    UUID explosionId,
++    String worldName,
++    List<AffectedBlockSnapshot> affectedBlocks,
++    List<UUID> damageCandidateEntityIds
++) implements ComputeResult {
++
++    public ExplosionPlanResult {
++        affectedBlocks = affectedBlocks == null ? List.of() : List.copyOf(affectedBlocks);
++        damageCandidateEntityIds = damageCandidateEntityIds == null ? List.of() : List.copyOf(damageCandidateEntityIds);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/ExplosionSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/ExplosionSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..68325cdf5aab4ea8109f9680344a4b806bc70cf2
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/ExplosionSnapshot.java
+@@ -0,0 +1,21 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeSnapshot;
++import java.util.List;
++import java.util.UUID;
++
++public record ExplosionSnapshot(
++    ComputeGeneration generation,
++    UUID explosionId,
++    String worldName,
++    LocationComputeSnapshot center,
++    float power,
++    List<BlockCollisionComputeSnapshot> sampledBlocks,
++    long regionTick
++) implements ComputeSnapshot {
++
++    public ExplosionSnapshot {
++        sampledBlocks = sampledBlocks == null ? List.of() : List.copyOf(sampledBlocks);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/LocationComputeSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/LocationComputeSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b0dbfa67888b59b5f43f83cfcc65a3d37672020
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/LocationComputeSnapshot.java
+@@ -0,0 +1,11 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++public record LocationComputeSnapshot(
++    String worldName,
++    double x,
++    double y,
++    double z,
++    float yaw,
++    float pitch
++) {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/PathfindingPlanResult.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/PathfindingPlanResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..14bdbb5daebe74bf719263c400c095b266a91be8
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/PathfindingPlanResult.java
+@@ -0,0 +1,19 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++import java.util.List;
++import java.util.UUID;
++
++public record PathfindingPlanResult(
++    ComputeGeneration generation,
++    UUID entityId,
++    String worldName,
++    List<LocationComputeSnapshot> path,
++    boolean partial
++) implements ComputeResult {
++
++    public PathfindingPlanResult {
++        path = path == null ? List.of() : List.copyOf(path);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/RoutingMetadataWarmupResult.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/RoutingMetadataWarmupResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..082ac9fe9d1d0be832d8942ea6c47df46c12d5ca
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/RoutingMetadataWarmupResult.java
+@@ -0,0 +1,18 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++import java.util.List;
++
++public record RoutingMetadataWarmupResult(
++    ComputeGeneration generation,
++    String pluginName,
++    int listenersScanned,
++    int commandsScanned,
++    List<String> warnings
++) implements ComputeResult {
++
++    public RoutingMetadataWarmupResult {
++        warnings = warnings == null ? List.of() : List.copyOf(warnings);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/RoutingMetadataWarmupSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/RoutingMetadataWarmupSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2083a500c1ace640ed61b71c10f715a1552db556
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/RoutingMetadataWarmupSnapshot.java
+@@ -0,0 +1,18 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeSnapshot;
++import java.util.List;
++
++public record RoutingMetadataWarmupSnapshot(
++    ComputeGeneration generation,
++    String pluginName,
++    List<String> listenerClassNames,
++    List<String> commandNames
++) implements ComputeSnapshot {
++
++    public RoutingMetadataWarmupSnapshot {
++        listenerClassNames = listenerClassNames == null ? List.of() : List.copyOf(listenerClassNames);
++        commandNames = commandNames == null ? List.of() : List.copyOf(commandNames);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/ScoreboardRenderResult.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/ScoreboardRenderResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ca30ff01222aa6a7d3d84d363539f4df776fc39
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/ScoreboardRenderResult.java
+@@ -0,0 +1,17 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++import java.util.List;
++import java.util.UUID;
++
++public record ScoreboardRenderResult(
++    ComputeGeneration generation,
++    UUID playerId,
++    List<String> renderedLines
++) implements ComputeResult {
++
++    public ScoreboardRenderResult {
++        renderedLines = renderedLines == null ? List.of() : List.copyOf(renderedLines);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/ScoreboardRenderSnapshot.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/ScoreboardRenderSnapshot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb0a940abacfb9755f87db2fd0432f84a703b6f9
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/ScoreboardRenderSnapshot.java
+@@ -0,0 +1,23 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeSnapshot;
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++
++public record ScoreboardRenderSnapshot(
++    ComputeGeneration generation,
++    UUID playerId,
++    String playerName,
++    String worldName,
++    List<String> templateLines,
++    Map<String, String> placeholders,
++    long regionTick
++) implements ComputeSnapshot {
++
++    public ScoreboardRenderSnapshot {
++        templateLines = templateLines == null ? List.of() : List.copyOf(templateLines);
++        placeholders = placeholders == null ? Map.of() : Map.copyOf(placeholders);
++    }
++}
+diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
+index c2f52791cc3b5451d86f0a16c60301de64e5a877..d141b0a26a1395149f367f99a20e8458e65d945e 100644
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -1,5 +1,7 @@
+ package org.spigotmc;
+ 
++import io.papermc.paper.fucktick.compute.FuckTickComputeContext;
++import io.papermc.paper.fucktick.compute.FuckTickComputeThreadChecks;
+ import io.papermc.paper.fucktick.plugin.FuckTickPluginContext;
+ import net.minecraft.server.MinecraftServer;
+ 
+@@ -12,6 +14,11 @@ public class AsyncCatcher {
+                 return;
+             }
+             // FuckTick End
++            // FuckTick Start - запрет live owner state из compute worker
++            if (FuckTickComputeContext.isComputeWorker()) {
++                FuckTickComputeThreadChecks.requireNotOwnerAccess(reason);
++            }
++            // FuckTick End
+             MinecraftServer.LOGGER.error("Thread {} failed main thread check: {}", Thread.currentThread().getName(), reason, new Throwable()); // Paper
+             throw new IllegalStateException("Asynchronous " + reason + "!");
+         }
+diff --git a/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java b/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f271e899fc02059a159d07ff024fa1f5b78720b6
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
+@@ -0,0 +1,473 @@
++package io.papermc.paper.fucktick.compute;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import io.papermc.paper.fucktick.compute.workload.AffectedBlockSnapshot;
++import io.papermc.paper.fucktick.compute.workload.BlockCollisionComputeSnapshot;
++import io.papermc.paper.fucktick.compute.workload.ChunkSavePayloadResult;
++import io.papermc.paper.fucktick.compute.workload.ChunkSaveSnapshot;
++import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingResult;
++import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingSnapshot;
++import io.papermc.paper.fucktick.compute.workload.EntityPathfindingSnapshot;
++import io.papermc.paper.fucktick.compute.workload.ExplosionPlanResult;
++import io.papermc.paper.fucktick.compute.workload.ExplosionSnapshot;
++import io.papermc.paper.fucktick.compute.workload.LocationComputeSnapshot;
++import io.papermc.paper.fucktick.compute.workload.PathfindingPlanResult;
++import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupResult;
++import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupSnapshot;
++import io.papermc.paper.fucktick.compute.workload.ScoreboardRenderResult;
++import io.papermc.paper.fucktick.compute.workload.ScoreboardRenderSnapshot;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++
++@Normal
++public class FuckTickComputeBrokerTest {
++
++    @Test
++    void pathfindingTaskRunsOnComputeWorkerAndAppliesOnOwnerThread() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try (OwnerExecutor owner = new OwnerExecutor("entity-owner")) {
++            final AtomicReference<String> computeThread = new AtomicReference<>();
++            final AtomicReference<String> applyThread = new AtomicReference<>();
++            final TestSnapshot snapshot = broker.snapshot(
++                ComputeTaskType.PATHFINDING,
++                "entity-owner",
++                () -> true,
++                () -> new TestSnapshot(ComputeGeneration.of(1L), 41)
++            );
++
++            final ComputeTaskHandle<TestResult> handle = broker.submit(
++                ComputeTaskType.PATHFINDING,
++                ComputePriority.HIGH_ENTITY_AI,
++                new ComputeTaskOwner("world", null),
++                "pathfinding-test",
++                snapshot,
++                (input, token) -> {
++                    assertTrue(FuckTickComputeContext.isComputeWorker());
++                    assertEquals(ComputeTaskType.PATHFINDING, FuckTickComputeContext.currentTaskType());
++                    computeThread.set(Thread.currentThread().getName());
++                    return new TestResult(input.generation(), input.value() + 1);
++                },
++                owner,
++                (context, result) -> {
++                    assertTrue(owner.isOwnerThread());
++                    applyThread.set(Thread.currentThread().getName());
++                    assertEquals(42, result.value());
++                    return ComputeApplyDecision.APPLIED;
++                }
++            );
++
++            assertEquals(ComputeTaskState.APPLIED, handle.completion().get(5L, TimeUnit.SECONDS));
++            assertNotNull(computeThread.get());
++            assertTrue(computeThread.get().startsWith("FuckTick Compute Worker - "));
++            assertEquals("entity-owner", applyThread.get());
++            final ComputeTaskTypeSnapshot stats = broker.snapshot().taskTypes().stream()
++                .filter(type -> type.type() == ComputeTaskType.PATHFINDING)
++                .findFirst()
++                .orElseThrow();
++            assertEquals(1L, stats.submitted());
++            assertEquals(1L, stats.completed());
++            assertEquals(1L, stats.applied());
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void staleResultIsNotAppliedWhenGenerationChanges() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            final AtomicBoolean applied = new AtomicBoolean();
++            final ComputeTaskHandle<TestResult> handle = broker.submit(
++                ComputeTaskType.PATHFINDING,
++                ComputePriority.HIGH_ENTITY_AI,
++                ComputeTaskOwner.SERVER,
++                "stale-pathfinding-test",
++                new TestSnapshot(ComputeGeneration.of(1L), 1),
++                (input, token) -> new TestResult(ComputeGeneration.of(2L), 2),
++                Runnable::run,
++                (context, result) -> {
++                    applied.set(true);
++                    return ComputeApplyDecision.APPLIED;
++                }
++            );
++
++            assertEquals(ComputeTaskState.STALE, handle.completion().get(5L, TimeUnit.SECONDS));
++            assertFalse(applied.get());
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void cancellationBeforeRunSkipsQueuedTask() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            final CountDownLatch running = new CountDownLatch(1);
++            final CountDownLatch release = new CountDownLatch(1);
++            final ComputeTaskHandle<TestResult> blocker = broker.submit(
++                ComputeTaskType.GENERIC,
++                ComputePriority.NORMAL_WORLD_COMPUTE,
++                ComputeTaskOwner.SERVER,
++                "blocking-task",
++                new TestSnapshot(ComputeGeneration.of(1L), 1),
++                (input, token) -> {
++                    running.countDown();
++                    assertTrue(release.await(5L, TimeUnit.SECONDS));
++                    return new TestResult(input.generation(), input.value());
++                },
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++            assertTrue(running.await(5L, TimeUnit.SECONDS));
++
++            final AtomicBoolean applied = new AtomicBoolean();
++            final ComputeTaskHandle<TestResult> cancelled = broker.submit(
++                ComputeTaskType.PATHFINDING,
++                ComputePriority.HIGH_ENTITY_AI,
++                ComputeTaskOwner.SERVER,
++                "cancelled-task",
++                new TestSnapshot(ComputeGeneration.of(1L), 2),
++                (input, token) -> new TestResult(input.generation(), input.value()),
++                Runnable::run,
++                (context, result) -> {
++                    applied.set(true);
++                    return ComputeApplyDecision.APPLIED;
++                }
++            );
++            cancelled.cancel("entity removed");
++            release.countDown();
++
++            assertEquals(ComputeTaskState.APPLIED, blocker.completion().get(5L, TimeUnit.SECONDS));
++            assertEquals(ComputeTaskState.CANCELLED, cancelled.completion().get(5L, TimeUnit.SECONDS));
++            assertFalse(applied.get());
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void highPriorityTaskDisplacesLowPriorityQueuedTask() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 1, 10_000L);
++        try {
++            final CountDownLatch running = new CountDownLatch(1);
++            final CountDownLatch release = new CountDownLatch(1);
++            final ComputeTaskHandle<TestResult> blocker = broker.submit(
++                ComputeTaskType.GENERIC,
++                ComputePriority.NORMAL_WORLD_COMPUTE,
++                ComputeTaskOwner.SERVER,
++                "blocking-task",
++                new TestSnapshot(ComputeGeneration.of(1L), 1),
++                (input, token) -> {
++                    running.countDown();
++                    assertTrue(release.await(5L, TimeUnit.SECONDS));
++                    return new TestResult(input.generation(), input.value());
++                },
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++            assertTrue(running.await(5L, TimeUnit.SECONDS));
++
++            final ComputeTaskHandle<TestResult> low = broker.submit(
++                ComputeTaskType.DIAGNOSTIC_FORMAT,
++                ComputePriority.LOW_DIAGNOSTICS,
++                ComputeTaskOwner.SERVER,
++                "low-priority-diagnostic",
++                new TestSnapshot(ComputeGeneration.of(1L), 2),
++                (input, token) -> new TestResult(input.generation(), input.value()),
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++            final ComputeTaskHandle<TestResult> high = broker.submit(
++                ComputeTaskType.PATHFINDING,
++                ComputePriority.HIGH_ENTITY_AI,
++                ComputeTaskOwner.SERVER,
++                "high-priority-pathfinding",
++                new TestSnapshot(ComputeGeneration.of(1L), 3),
++                (input, token) -> new TestResult(input.generation(), input.value()),
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++            release.countDown();
++
++            assertEquals(ComputeTaskState.APPLIED, blocker.completion().get(5L, TimeUnit.SECONDS));
++            assertEquals(ComputeTaskState.REJECTED, low.completion().get(5L, TimeUnit.SECONDS));
++            assertEquals(ComputeTaskState.APPLIED, high.completion().get(5L, TimeUnit.SECONDS));
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void computeWorkerLiveAccessFailsWithComputeDiagnostic() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            final ComputeTaskHandle<TestResult> handle = broker.submit(
++                ComputeTaskType.PATHFINDING,
++                ComputePriority.HIGH_ENTITY_AI,
++                ComputeTaskOwner.SERVER,
++                "live-access-test",
++                new TestSnapshot(ComputeGeneration.of(1L), 1),
++                (input, token) -> {
++                    FuckTickComputeThreadChecks.requireNotOwnerAccess("live world state");
++                    return new TestResult(input.generation(), input.value());
++                },
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++
++            assertEquals(ComputeTaskState.FAILED, handle.completion().get(5L, TimeUnit.SECONDS));
++            assertTrue(handle.snapshot().failureMessage().contains("attempted to access live world state"));
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void snapshotCreationRequiresOwnerThread() {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            assertThrows(IllegalStateException.class, () -> broker.snapshot(
++                ComputeTaskType.PATHFINDING,
++                "entity-owner",
++                () -> false,
++                () -> new TestSnapshot(ComputeGeneration.of(1L), 1)
++            ));
++            final TestSnapshot snapshot = broker.snapshot(
++                ComputeTaskType.PATHFINDING,
++                "entity-owner",
++                () -> true,
++                () -> new TestSnapshot(ComputeGeneration.of(1L), 1)
++            );
++            assertEquals(ComputeGeneration.of(1L), snapshot.generation());
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void shutdownCancelsQueuedTasksAndStopsWorkers() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        final CountDownLatch running = new CountDownLatch(1);
++        final ComputeTaskHandle<TestResult> blocker = broker.submit(
++            ComputeTaskType.GENERIC,
++            ComputePriority.NORMAL_WORLD_COMPUTE,
++            ComputeTaskOwner.SERVER,
++            "blocking-task",
++            new TestSnapshot(ComputeGeneration.of(1L), 1),
++            (input, token) -> {
++                running.countDown();
++                Thread.sleep(TimeUnit.SECONDS.toMillis(30L));
++                return new TestResult(input.generation(), input.value());
++            },
++            Runnable::run,
++            (context, result) -> ComputeApplyDecision.APPLIED
++        );
++        assertTrue(running.await(5L, TimeUnit.SECONDS));
++        final ComputeTaskHandle<TestResult> queued = broker.submit(
++            ComputeTaskType.DIAGNOSTIC_FORMAT,
++            ComputePriority.LOW_DIAGNOSTICS,
++            ComputeTaskOwner.SERVER,
++            "queued-task",
++            new TestSnapshot(ComputeGeneration.of(1L), 2),
++            (input, token) -> new TestResult(input.generation(), input.value()),
++            Runnable::run,
++            (context, result) -> ComputeApplyDecision.APPLIED
++        );
++
++        broker.shutdown();
++
++        assertEquals(ComputeTaskState.CANCELLED, queued.completion().get(5L, TimeUnit.SECONDS));
++        assertEquals(ComputeTaskState.CANCELLED, blocker.completion().get(5L, TimeUnit.SECONDS));
++        assertTrue(broker.snapshot().shutdown());
++        assertTrue(broker.snapshot().workers().stream().noneMatch(ComputeWorkerSnapshot::alive));
++    }
++
++    @Test
++    void typeSpecificBudgetRejectsExcessPathfindingWork() throws Exception {
++        final FuckTickComputeBroker broker = FuckTickComputeBroker.createForTesting(new ComputeBudgetPolicy(
++            1,
++            16,
++            16,
++            16,
++            1,
++            16,
++            16,
++            10_000L,
++            10_000L,
++            5_000L,
++            256
++        ));
++        try {
++            final CountDownLatch running = new CountDownLatch(1);
++            final CountDownLatch release = new CountDownLatch(1);
++            final ComputeTaskHandle<TestResult> first = broker.submit(
++                ComputeTaskType.PATHFINDING,
++                ComputePriority.HIGH_ENTITY_AI,
++                ComputeTaskOwner.SERVER,
++                "pathfinding-budget-first",
++                new TestSnapshot(ComputeGeneration.of(1L), 1),
++                (input, token) -> {
++                    running.countDown();
++                    assertTrue(release.await(5L, TimeUnit.SECONDS));
++                    return new TestResult(input.generation(), input.value());
++                },
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++            assertTrue(running.await(5L, TimeUnit.SECONDS));
++
++            final ComputeTaskHandle<TestResult> rejected = broker.submit(
++                ComputeTaskType.PATHFINDING,
++                ComputePriority.HIGH_ENTITY_AI,
++                ComputeTaskOwner.SERVER,
++                "pathfinding-budget-second",
++                new TestSnapshot(ComputeGeneration.of(1L), 2),
++                (input, token) -> new TestResult(input.generation(), input.value()),
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++            release.countDown();
++
++            assertEquals(ComputeTaskState.REJECTED, rejected.completion().get(5L, TimeUnit.SECONDS));
++            assertEquals(ComputeTaskState.APPLIED, first.completion().get(5L, TimeUnit.SECONDS));
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void candidateWorkloadSnapshotsCoverFullComputeBrokerContract() {
++        final ComputeGeneration generation = ComputeGeneration.of(7L);
++        final UUID entityId = UUID.randomUUID();
++        final UUID playerId = UUID.randomUUID();
++        final UUID explosionId = UUID.randomUUID();
++        final LocationComputeSnapshot from = new LocationComputeSnapshot("world", 1.0D, 64.0D, 1.0D, 0.0F, 0.0F);
++        final LocationComputeSnapshot to = new LocationComputeSnapshot("world", 8.0D, 65.0D, 8.0D, 0.0F, 0.0F);
++        final List<BlockCollisionComputeSnapshot> collisions = new ArrayList<>();
++        collisions.add(new BlockCollisionComputeSnapshot(1, 64, 1, "minecraft:stone", true, 6.0F));
++
++        final EntityPathfindingSnapshot pathSnapshot = new EntityPathfindingSnapshot(generation, entityId, "world", from, to, collisions, 42L);
++        final PathfindingPlanResult pathResult = new PathfindingPlanResult(generation, entityId, "world", List.of(from, to), false);
++        final ExplosionSnapshot explosionSnapshot = new ExplosionSnapshot(generation, explosionId, "world", from, 4.0F, collisions, 43L);
++        final ExplosionPlanResult explosionResult = new ExplosionPlanResult(generation, explosionId, "world", List.of(new AffectedBlockSnapshot(1, 64, 1, "minecraft:stone")), List.of(entityId));
++        final byte[] payload = new byte[] {1, 2, 3};
++        final ChunkSaveSnapshot chunkSnapshot = new ChunkSaveSnapshot(generation, "world", 3, 4, payload, 44L);
++        final ChunkSavePayloadResult chunkResult = new ChunkSavePayloadResult(generation, "world", 3, 4, payload, "abc");
++        final ScoreboardRenderSnapshot scoreboardSnapshot = new ScoreboardRenderSnapshot(generation, playerId, "player", "world", List.of("Hello %player%"), Map.of("%player%", "player"), 45L);
++        final ScoreboardRenderResult scoreboardResult = new ScoreboardRenderResult(generation, playerId, List.of("Hello player"));
++        final DiagnosticFormattingSnapshot diagnosticSnapshot = new DiagnosticFormattingSnapshot(generation, "compute", Map.of("queued", "1"), List.of("section"));
++        final DiagnosticFormattingResult diagnosticResult = new DiagnosticFormattingResult(generation, "compute", "formatted");
++        final RoutingMetadataWarmupSnapshot routingSnapshot = new RoutingMetadataWarmupSnapshot(generation, "Plugin", List.of("Listener"), List.of("command"));
++        final RoutingMetadataWarmupResult routingResult = new RoutingMetadataWarmupResult(generation, "Plugin", 1, 1, List.of());
++
++        assertEquals(generation, pathSnapshot.generation());
++        assertEquals(generation, pathResult.generation());
++        assertEquals(generation, explosionSnapshot.generation());
++        assertEquals(generation, explosionResult.generation());
++        assertEquals(generation, chunkSnapshot.generation());
++        assertEquals(generation, chunkResult.generation());
++        assertEquals(generation, scoreboardSnapshot.generation());
++        assertEquals(generation, scoreboardResult.generation());
++        assertEquals(generation, diagnosticSnapshot.generation());
++        assertEquals(generation, diagnosticResult.generation());
++        assertEquals(generation, routingSnapshot.generation());
++        assertEquals(generation, routingResult.generation());
++
++        collisions.add(new BlockCollisionComputeSnapshot(2, 64, 2, "minecraft:dirt", true, 1.0F));
++        payload[0] = 99;
++        assertEquals(1, pathSnapshot.nearbyCollision().size());
++        assertEquals(1, explosionSnapshot.sampledBlocks().size());
++        assertEquals(1, chunkSnapshot.uncompressedPayload()[0]);
++        assertEquals(1, chunkResult.compressedPayload()[0]);
++        assertThrows(UnsupportedOperationException.class, () -> pathResult.path().add(to));
++        assertThrows(UnsupportedOperationException.class, () -> scoreboardSnapshot.templateLines().add("bad"));
++    }
++
++    private static FuckTickComputeBroker broker(final int workers, final int maxQueued, final long maxApplyDelayMs) {
++        return FuckTickComputeBroker.createForTesting(new ComputeBudgetPolicy(
++            workers,
++            maxQueued,
++            16,
++            16,
++            16,
++            16,
++            16,
++            10_000L,
++            maxApplyDelayMs,
++            5_000L,
++            256
++        ));
++    }
++
++    private record TestSnapshot(ComputeGeneration generation, int value) implements ComputeSnapshot {
++    }
++
++    private record TestResult(ComputeGeneration generation, int value) implements ComputeResult {
++    }
++
++    private static final class OwnerExecutor implements ComputeApplyExecutor, AutoCloseable {
++
++        private final BlockingQueue<Runnable> queue = new LinkedBlockingQueue<>();
++        private final CountDownLatch started = new CountDownLatch(1);
++        private final Thread thread;
++        private volatile boolean running = true;
++        private volatile Thread ownerThread;
++
++        private OwnerExecutor(final String name) throws InterruptedException {
++            this.thread = new Thread(this::run, name);
++            this.thread.start();
++            assertTrue(this.started.await(5L, TimeUnit.SECONDS));
++        }
++
++        @Override
++        public void execute(final Runnable runnable) {
++            this.queue.add(runnable);
++        }
++
++        @Override
++        public String ownerContext() {
++            return this.thread.getName();
++        }
++
++        @Override
++        public boolean isOwnerThread() {
++            return Thread.currentThread() == this.ownerThread;
++        }
++
++        @Override
++        public void close() throws InterruptedException {
++            this.running = false;
++            this.queue.add(() -> {
++            });
++            this.thread.join(TimeUnit.SECONDS.toMillis(5L));
++        }
++
++        private void run() {
++            this.ownerThread = Thread.currentThread();
++            this.started.countDown();
++            while (this.running) {
++                try {
++                    this.queue.take().run();
++                } catch (final InterruptedException ex) {
++                    Thread.currentThread().interrupt();
++                    return;
++                }
++            }
++        }
++    }
++}

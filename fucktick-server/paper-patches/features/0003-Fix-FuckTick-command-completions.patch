@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 03:54:48 +0500
+Subject: [PATCH] Fix FuckTick command completions
+
+
+diff --git a/src/main/java/io/papermc/paper/command/FuckTickCommand.java b/src/main/java/io/papermc/paper/command/FuckTickCommand.java
+index d08ca3c6bb17da5eb2dae8fd7484987065af322d..74b7852e843593f792d684667de9b567a7aab7be 100644
+--- a/src/main/java/io/papermc/paper/command/FuckTickCommand.java
++++ b/src/main/java/io/papermc/paper/command/FuckTickCommand.java
+@@ -52,20 +52,25 @@ public final class FuckTickCommand extends Command {
+     @Override
+     public @NotNull List<String> tabComplete(final @NotNull CommandSender sender, final @NotNull String alias, final @NotNull String[] args) throws IllegalArgumentException {
+         if (args.length == 1) {
+-            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, List.of("plugins", "plugin"));
++            return matchingLast(args, List.of("plugins", "plugin"));
+         }
+         if (args.length == 2 && args[0].equalsIgnoreCase("plugins")) {
+-            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, List.of("threads"));
++            return matchingLast(args, List.of("threads"));
+         }
+         if (args.length == 2 && args[0].equalsIgnoreCase("plugin")) {
+-            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, PluginFUCKLOADER.instance().snapshots().stream().map(PluginRuntimeSnapshot::pluginName).toList());
++            return matchingLast(args, PluginFUCKLOADER.instance().snapshots().stream().map(PluginRuntimeSnapshot::pluginName).toList());
+         }
+         if (args.length == 3 && args[0].equalsIgnoreCase("plugin")) {
+-            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, List.of("dump", "queue", "routing"));
++            return matchingLast(args, List.of("dump", "queue", "routing"));
+         }
+         return List.of();
+     }
+ 
++    private static List<String> matchingLast(final String[] args, final List<String> values) {
++        final String token = args.length == 0 ? "" : args[args.length - 1].toLowerCase(java.util.Locale.ROOT);
++        return values.stream().filter(value -> value.toLowerCase(java.util.Locale.ROOT).startsWith(token)).toList();
++    }
++
+     private void sendThreads(final CommandSender sender) {
+         final List<PluginRuntimeSnapshot> snapshots = PluginFUCKLOADER.instance().snapshots();
+         if (snapshots.isEmpty()) {

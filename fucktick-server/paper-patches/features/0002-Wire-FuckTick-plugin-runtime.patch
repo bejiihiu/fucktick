@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 03:48:49 +0500
+Subject: [PATCH] Wire FuckTick plugin runtime
+
+
+diff --git a/src/main/java/io/papermc/paper/command/FuckTickCommand.java b/src/main/java/io/papermc/paper/command/FuckTickCommand.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d08ca3c6bb17da5eb2dae8fd7484987065af322d
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/command/FuckTickCommand.java
+@@ -0,0 +1,118 @@
++package io.papermc.paper.command;
++
++import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
++import io.papermc.paper.fucktick.plugin.PluginRuntimeSnapshot;
++import java.io.PrintWriter;
++import java.io.StringWriter;
++import java.util.List;
++import org.bukkit.Bukkit;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.permissions.Permission;
++import org.bukkit.permissions.PermissionDefault;
++import org.jetbrains.annotations.NotNull;
++
++public final class FuckTickCommand extends Command {
++
++    public FuckTickCommand(final String name) {
++        super(name);
++        this.description = "FuckTick diagnostics";
++        this.usageMessage = "/fucktick plugins threads | /fucktick plugin <name> dump|queue|routing";
++        this.setPermission("bukkit.command.fucktick");
++        Bukkit.getPluginManager().addPermission(new Permission("bukkit.command.fucktick", PermissionDefault.OP));
++    }
++
++    @Override
++    public boolean execute(final @NotNull CommandSender sender, final @NotNull String commandLabel, final @NotNull String[] args) {
++        if (!this.testPermission(sender)) {
++            return true;
++        }
++        if (args.length >= 2 && args[0].equalsIgnoreCase("plugins") && args[1].equalsIgnoreCase("threads")) {
++            this.sendThreads(sender);
++            return true;
++        }
++        if (args.length >= 3 && args[0].equalsIgnoreCase("plugin")) {
++            final PluginRuntimeSnapshot snapshot = PluginFUCKLOADER.instance().snapshot(args[1]);
++            if (snapshot == null) {
++                sender.sendMessage("Unknown plugin runtime: " + args[1]);
++                return true;
++            }
++            switch (args[2].toLowerCase(java.util.Locale.ROOT)) {
++                case "dump" -> this.sendDump(sender, snapshot);
++                case "queue" -> this.sendQueue(sender, snapshot);
++                case "routing" -> this.sendRouting(sender, snapshot);
++                default -> sender.sendMessage("Usage: " + this.usageMessage);
++            }
++            return true;
++        }
++        sender.sendMessage("Usage: " + this.usageMessage);
++        return true;
++    }
++
++    @Override
++    public @NotNull List<String> tabComplete(final @NotNull CommandSender sender, final @NotNull String alias, final @NotNull String[] args) throws IllegalArgumentException {
++        if (args.length == 1) {
++            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, List.of("plugins", "plugin"));
++        }
++        if (args.length == 2 && args[0].equalsIgnoreCase("plugins")) {
++            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, List.of("threads"));
++        }
++        if (args.length == 2 && args[0].equalsIgnoreCase("plugin")) {
++            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, PluginFUCKLOADER.instance().snapshots().stream().map(PluginRuntimeSnapshot::pluginName).toList());
++        }
++        if (args.length == 3 && args[0].equalsIgnoreCase("plugin")) {
++            return io.papermc.paper.command.CommandUtil.getListMatchingLast(sender, args, List.of("dump", "queue", "routing"));
++        }
++        return List.of();
++    }
++
++    private void sendThreads(final CommandSender sender) {
++        final List<PluginRuntimeSnapshot> snapshots = PluginFUCKLOADER.instance().snapshots();
++        if (snapshots.isEmpty()) {
++            sender.sendMessage("No plugin runtimes registered.");
++            return;
++        }
++        for (final PluginRuntimeSnapshot snapshot : snapshots) {
++            sender.sendMessage(snapshot.pluginName() + " state=" + snapshot.state() + " thread=\"" + snapshot.threadName() + "\" tid=" + snapshot.threadId() + " queued=" + snapshot.queuedTasks());
++        }
++    }
++
++    private void sendDump(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
++        sender.sendMessage("Plugin: " + snapshot.pluginName());
++        sender.sendMessage("State: " + snapshot.state());
++        sender.sendMessage("Thread: " + snapshot.threadName());
++        sender.sendMessage("ThreadId: " + snapshot.threadId());
++        sender.sendMessage("Queue size: " + snapshot.queuedTasks());
++        sender.sendMessage("Result queue size: " + snapshot.resultQueueSize());
++        sender.sendMessage("Running task: " + snapshot.runningTask());
++        sender.sendMessage("Last task duration: " + snapshot.lastTaskDurationMs() + "ms");
++        sender.sendMessage("Average task duration: " + snapshot.averageTaskDurationMs() + "ms");
++        sender.sendMessage("Blocked callers: " + snapshot.blockedCallers());
++        sender.sendMessage("Last owner context: " + snapshot.lastOwnerContext());
++        final Throwable failure = PluginFUCKLOADER.instance().failure(snapshot.pluginName());
++        if (failure != null) {
++            final StringWriter writer = new StringWriter();
++            failure.printStackTrace(new PrintWriter(writer));
++            sender.sendMessage("Failure: " + writer);
++        }
++    }
++
++    private void sendQueue(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
++        sender.sendMessage("Plugin: " + snapshot.pluginName());
++        sender.sendMessage("Lifecycle queue size: " + snapshot.lifecycleQueuedTasks());
++        sender.sendMessage("Callback queue size: " + snapshot.queuedTasks());
++        sender.sendMessage("Result queue size: " + snapshot.resultQueueSize());
++        sender.sendMessage("Blocked callers: " + snapshot.blockedCallers());
++    }
++
++    private void sendRouting(final CommandSender sender, final PluginRuntimeSnapshot snapshot) {
++        sender.sendMessage("Plugin: " + snapshot.pluginName());
++        sender.sendMessage("Commands: plugin-thread blocking result");
++        sender.sendMessage("Tab-complete: plugin-thread blocking result");
++        sender.sendMessage("AsyncScheduler: plugin-thread");
++        sender.sendMessage("RegionScheduler: owner-thread");
++        sender.sendMessage("EntityScheduler: owner-thread");
++        sender.sendMessage("GlobalRegionScheduler: owner-thread");
++        sender.sendMessage("Unknown events: owner-only");
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/command/PaperCommands.java b/src/main/java/io/papermc/paper/command/PaperCommands.java
+index 3deca0b4e95609dc95376a86b5cbd525729a1031..d6613e69eb50f4e74fe27799ceb300c6fb9e33e6 100644
+--- a/src/main/java/io/papermc/paper/command/PaperCommands.java
++++ b/src/main/java/io/papermc/paper/command/PaperCommands.java
+@@ -26,6 +26,9 @@ public final class PaperCommands {
+         COMMANDS.put("mspt", new MSPTCommand("mspt"));
+         COMMANDS.put("tps", new io.papermc.paper.threadedregions.commands.CommandServerHealth()); // Folia - region threading
+         COMMANDS.put("profiler", new io.papermc.paper.threadedregions.commands.CommandProfiler()); // Folia - region threading - profiler
++        // FuckTick Start - диагностическая команда runtime плагинов
++        COMMANDS.put("fucktick", new FuckTickCommand("fucktick"));
++        // FuckTick End
+ 
+         COMMANDS.forEach((s, command) -> {
+             server.server.getCommandMap().register(s, "Paper", command);
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..98d1b6a483d32202ba6d923b2d051fc957dd85e5 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -4,6 +4,11 @@ import co.aikar.timings.TimedEventExecutor;
+ import com.destroystokyo.paper.event.server.ServerExceptionEvent;
+ import com.destroystokyo.paper.exception.ServerEventException;
+ import com.google.common.collect.Sets;
++import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
++import io.papermc.paper.fucktick.plugin.PluginRuntimeSettings;
++import io.papermc.paper.fucktick.plugin.routing.EventRoutingRegistry;
++import io.papermc.paper.fucktick.plugin.routing.RoutingPlan;
++import io.papermc.paper.fucktick.plugin.routing.RoutingPlanType;
+ import org.bukkit.Server;
+ import org.bukkit.Warning;
+ import org.bukkit.event.Event;
+@@ -44,6 +49,9 @@ class PaperEventManager {
+ 
+         HandlerList handlers = event.getHandlers();
+         RegisteredListener[] listeners = handlers.getRegisteredListeners();
++        // FuckTick Start - conservative routing metadata для событий
++        final RoutingPlan routingPlan = EventRoutingRegistry.plan(event);
++        // FuckTick End
+ 
+         for (RegisteredListener registration : listeners) {
+             if (!registration.getPlugin().isEnabled()) {
+@@ -51,7 +59,16 @@ class PaperEventManager {
+             }
+ 
+             try {
+-                registration.callEvent(event);
++                // FuckTick Start - offload безопасных async callbacks на поток плагина
++                if (routingPlan.type() == RoutingPlanType.ASYNC_PLUGIN) {
++                    PluginFUCKLOADER.instance().callPluginBlocking(registration.getPlugin(), "event:" + event.getEventName(), () -> {
++                        registration.callEvent(event);
++                        return null;
++                    }, PluginRuntimeSettings.maxPluginCallbackTimeMs());
++                } else {
++                    registration.callEvent(event);
++                }
++                // FuckTick End
+             } catch (AuthorNagException ex) {
+                 Plugin plugin = registration.getPlugin();
+ 
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+index 578102113c2034ed220a4753ee5b69e0270321ce..14dae7c0daf8690a6042dc6e4533cbcac7f76444 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+@@ -93,6 +93,10 @@ class PaperPluginInstanceManager {
+     public void loadPlugin(Plugin provided) {
+         PluginMeta configuration = provided.getPluginMeta();
+ 
++        // FuckTick Start - регистрация runtime плагина
++        io.papermc.paper.fucktick.plugin.PluginFUCKLOADER.instance().registerPlugin(provided);
++        // FuckTick End
++
+         this.plugins.add(provided);
+         this.lookupNames.put(configuration.getName().toLowerCase(java.util.Locale.ENGLISH), provided);
+         for (String providedPlugin : configuration.getProvidedPlugins()) {
+@@ -204,7 +208,9 @@ class PaperPluginInstanceManager {
+             } // Paper
+ 
+             try {
+-                jPlugin.setEnabled(true);
++                // FuckTick Start - onEnable на выделенном потоке плагина
++                io.papermc.paper.fucktick.plugin.PluginFUCKLOADER.instance().enablePlugin(jPlugin, () -> jPlugin.setEnabled(true));
++                // FuckTick End
+             } catch (Throwable ex) {
+                 this.server.getLogger().log(Level.SEVERE, "Error occurred while enabling " + plugin.getPluginMeta().getDisplayName() + " (Is it up to date?)", ex);
+                 // Paper start - Disable plugins that fail to load
+@@ -239,7 +245,9 @@ class PaperPluginInstanceManager {
+ 
+             this.server.getPluginManager().callEvent(new PluginDisableEvent(plugin));
+             try {
+-                javaPlugin.setEnabled(false);
++                // FuckTick Start - onDisable на выделенном потоке плагина перед выгрузкой classloader
++                io.papermc.paper.fucktick.plugin.PluginFUCKLOADER.instance().disablePlugin(javaPlugin, () -> javaPlugin.setEnabled(false));
++                // FuckTick End
+             } catch (Throwable ex) {
+                 this.server.getLogger().log(Level.SEVERE, "Error occurred while disabling " + pluginName, ex);
+             }
+diff --git a/src/main/java/io/papermc/paper/plugin/storage/ServerPluginProviderStorage.java b/src/main/java/io/papermc/paper/plugin/storage/ServerPluginProviderStorage.java
+index cb9b13522a976b82bcb71cef486f11f4172e3e99..59c44d8de49b1221bf12c16c36baa9a468c42070 100644
+--- a/src/main/java/io/papermc/paper/plugin/storage/ServerPluginProviderStorage.java
++++ b/src/main/java/io/papermc/paper/plugin/storage/ServerPluginProviderStorage.java
+@@ -56,7 +56,9 @@ public class ServerPluginProviderStorage extends ConfiguredProviderStorage<JavaP
+     public void processProvided(PluginProvider<JavaPlugin> provider, JavaPlugin provided) {
+         try {
+             provided.getLogger().info(String.format("Loading server plugin %s", provided.getPluginMeta().getDisplayName()));
+-            provided.onLoad();
++            // FuckTick Start - onLoad на management thread загрузчика плагинов
++            io.papermc.paper.fucktick.plugin.PluginFUCKLOADER.instance().loadPlugin(provided, provided::onLoad);
++            // FuckTick End
+         } catch (Throwable ex) {
+             // Don't mark that provider as ERRORED, as this apparently still needs to run the onEnable logic.
+             provided.getSLF4JLogger().error("Error initializing plugin '%s' in folder '%s' (Is it up to date?)".formatted(provider.getFileName(), provider.getParentSource()), ex);
+diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
+index a1c153650b9146a245bf61ed3e89d407065da077..209ba27fc8a4bce8898f59abc9d7657b03e6591d 100644
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
+@@ -1,6 +1,7 @@
+ package io.papermc.paper.threadedregions.scheduler;
+ 
+ import com.mojang.logging.LogUtils;
++import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
+ import org.bukkit.plugin.IllegalPluginAccessException;
+ import org.bukkit.plugin.Plugin;
+ import org.slf4j.Logger;
+@@ -72,7 +73,14 @@ public final class FoliaAsyncScheduler implements AsyncScheduler {
+         final AsyncScheduledTask ret = new AsyncScheduledTask(plugin, -1L, task, null, -1L);
+ 
+         this.tasks.add(ret);
+-        this.executors.execute(ret);
++        // FuckTick Start - AsyncScheduler выполняет plugin code на потоке плагина
++        PluginFUCKLOADER.instance().executePluginTask(plugin, "async-scheduler:runNow", ret).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                ret.cancel();
++                plugin.getLogger().log(Level.WARNING, "Async task for " + plugin.getDescription().getFullName() + " could not be queued on plugin thread", throwable);
++            }
++        });
++        // FuckTick End
+ 
+         if (!plugin.isEnabled()) {
+             // handle race condition where plugin is disabled asynchronously
+@@ -208,7 +216,14 @@ public final class FoliaAsyncScheduler implements AsyncScheduler {
+             if (timer) {
+                 // the scheduled executor is single thread, and unfortunately not expandable with threads
+                 // so we just schedule onto the executor
+-                FoliaAsyncScheduler.this.executors.execute(this);
++                // FuckTick Start - таймер передает async task в очередь плагина
++                PluginFUCKLOADER.instance().executePluginTask(this.plugin, "async-scheduler:timer", this).whenComplete((ignored, throwable) -> {
++                    if (throwable != null) {
++                        this.cancel();
++                        this.plugin.getLogger().log(Level.WARNING, "Async task for " + this.plugin.getDescription().getFullName() + " could not be queued on plugin thread", throwable);
++                    }
++                });
++                // FuckTick End
+                 return;
+             }
+ 

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 04:41:50 +0500
+Subject: [PATCH] Allow plugin thread sync event dispatch
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index 98d1b6a483d32202ba6d923b2d051fc957dd85e5..72dac3a4661512b47c0cd2057afe102457a08dd9 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -4,6 +4,7 @@ import co.aikar.timings.TimedEventExecutor;
+ import com.destroystokyo.paper.event.server.ServerExceptionEvent;
+ import com.destroystokyo.paper.exception.ServerEventException;
+ import com.google.common.collect.Sets;
++import io.papermc.paper.fucktick.plugin.FuckTickThreadChecks;
+ import io.papermc.paper.fucktick.plugin.PluginFUCKLOADER;
+ import io.papermc.paper.fucktick.plugin.PluginRuntimeSettings;
+ import io.papermc.paper.fucktick.plugin.routing.EventRoutingRegistry;
+@@ -41,9 +42,12 @@ class PaperEventManager {
+ 
+     // SimplePluginManager
+     public void callEvent(@NotNull Event event) {
++        // FuckTick Start - sync-события из потока плагина
++        final boolean fuckTickPluginThread = FuckTickThreadChecks.isPluginThread();
++        // FuckTick End
+         if (event.isAsynchronous() && this.server.isPrimaryThread()) {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
+-        } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !this.server.isStopping()) {
++        } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !fuckTickPluginThread && !this.server.isStopping()) {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered synchronously.");
+         }
+ 

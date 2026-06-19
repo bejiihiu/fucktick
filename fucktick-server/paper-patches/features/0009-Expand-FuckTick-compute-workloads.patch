@@ -1,0 +1,794 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bejiihiu <bejiihiu@icloud.com>
+Date: Thu, 18 Jun 2026 17:58:45 +0500
+Subject: [PATCH] Expand FuckTick compute workloads
+
+
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTask.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTask.java
+index 604da0445718009f2a19161d9518d0ccfcdbbbad..cddeb76205c8b940c36e63e60945ded2ccd7bd20 100644
+--- a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTask.java
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTask.java
+@@ -18,6 +18,7 @@ final class ComputeTask<S extends ComputeSnapshot, R extends ComputeResult> impl
+     final ComputeApplyHandle<R> applyHandle;
+     final ComputeCancellationToken cancellationToken = new ComputeCancellationToken();
+     final CompletableFuture<ComputeTaskState> completion = new CompletableFuture<>();
++    final CompletableFuture<R> resultCompletion = new CompletableFuture<>();
+     final long submittedNanos = System.nanoTime();
+     final AtomicReference<ComputeTaskState> state = new AtomicReference<>(ComputeTaskState.SUBMITTED);
+     volatile long queuedNanos = -1L;
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskHandle.java b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskHandle.java
+index 9747f1c0436fdd38a01d638eec4c407b26801163..c603a89fe676a0525a2e24ee8850b1fdfc810d9a 100644
+--- a/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskHandle.java
++++ b/src/main/java/io/papermc/paper/fucktick/compute/ComputeTaskHandle.java
+@@ -1,24 +1,34 @@
+ package io.papermc.paper.fucktick.compute;
+ 
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
+ import java.util.function.Supplier;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
+ 
+ public final class ComputeTaskHandle<R extends ComputeResult> {
+ 
++    private static final Logger LOGGER = LoggerFactory.getLogger(ComputeTaskHandle.class);
++    private static final ThreadLocal<Boolean> BLOCKING_WAIT_ACTIVE = ThreadLocal.withInitial(() -> Boolean.FALSE);
++
+     private final long taskId;
+     private final ComputeCancellationToken cancellationToken;
+     private final CompletableFuture<ComputeTaskState> completion;
++    private final CompletableFuture<R> result;
+     private final Supplier<ComputeTaskSnapshot> snapshotSupplier;
+ 
+     ComputeTaskHandle(
+         final long taskId,
+         final ComputeCancellationToken cancellationToken,
+         final CompletableFuture<ComputeTaskState> completion,
++        final CompletableFuture<R> result,
+         final Supplier<ComputeTaskSnapshot> snapshotSupplier
+     ) {
+         this.taskId = taskId;
+         this.cancellationToken = cancellationToken;
+         this.completion = completion;
++        this.result = result;
+         this.snapshotSupplier = snapshotSupplier;
+     }
+ 
+@@ -38,6 +48,32 @@ public final class ComputeTaskHandle<R extends ComputeResult> {
+         return this.completion;
+     }
+ 
++    public CompletableFuture<R> result() {
++        return this.result;
++    }
++
++    public R awaitResultOrFallback(final long timeout, final TimeUnit unit, final Supplier<R> fallback) {
++        if (FuckTickComputeContext.isComputeWorker()) {
++            throw new IllegalStateException("Compute task " + FuckTickComputeContext.currentTaskType() + " attempted to wait for another compute result from a compute worker.");
++        }
++        if (BLOCKING_WAIT_ACTIVE.get()) {
++            throw new IllegalStateException("Nested owner wait for compute task " + this.taskId + " is forbidden.");
++        }
++        BLOCKING_WAIT_ACTIVE.set(Boolean.TRUE);
++        try {
++            return this.result.get(timeout, unit);
++        } catch (final TimeoutException ex) {
++            this.cancel("Timed out waiting for compute result");
++            LOGGER.warn("FuckTick compute result wait timed out. id={} timeout={}{} possibleDeadlock=true", this.taskId, timeout, unit);
++            return fallback.get();
++        } catch (final Exception ex) {
++            LOGGER.warn("FuckTick compute result wait failed. id={} fallback=true", this.taskId, ex);
++            return fallback.get();
++        } finally {
++            BLOCKING_WAIT_ACTIVE.set(Boolean.FALSE);
++        }
++    }
++
+     public ComputeTaskSnapshot snapshot() {
+         return this.snapshotSupplier.get();
+     }
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
+index 47ba3769dfc22be3be0f5759c43d96ec17872d7d..d2249fd67ecd203f5d2d9c173ba6572ba1a371b8 100644
+--- a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
++++ b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeBroker.java
+@@ -51,6 +51,7 @@ public final class FuckTickComputeBroker {
+         if (current != null) {
+             current.shutdown();
+         }
++        FuckTickComputeIoWorkerPool.shutdownIfInitialized();
+     }
+ 
+     static FuckTickComputeBroker createForTesting(final ComputeBudgetPolicy policy) {
+@@ -238,6 +239,7 @@ public final class FuckTickComputeBroker {
+             switch (decision) {
+                 case APPLIED -> {
+                     this.diagnostics.applied(task.type, applyStartNanos - task.computeFinishedNanos);
++                    task.resultCompletion.complete(result);
+                     this.finishTask(task, ComputeTaskState.APPLIED, "");
+                 }
+                 case STALE -> this.finishTask(task, ComputeTaskState.STALE, "");
+@@ -263,6 +265,9 @@ public final class FuckTickComputeBroker {
+             return;
+         }
+         task.failureMessage = failureMessage == null ? "" : failureMessage;
++        if (state != ComputeTaskState.APPLIED && !task.resultCompletion.isDone()) {
++            task.resultCompletion.completeExceptionally(new IllegalStateException(state + ": " + task.failureMessage));
++        }
+         switch (state) {
+             case STALE -> this.diagnostics.stale(task.type);
+             case CANCELLED -> this.diagnostics.cancelled(task.type);
+@@ -279,6 +284,7 @@ public final class FuckTickComputeBroker {
+     private void rejectNewTask(final ComputeTask<?, ?> task, final String reason) {
+         task.failureMessage = reason;
+         task.cancellationToken.cancel(reason);
++        task.resultCompletion.completeExceptionally(new IllegalStateException(reason));
+         task.transition(ComputeTaskState.REJECTED);
+         this.diagnostics.rejected(task.type);
+     }
+@@ -373,7 +379,7 @@ public final class FuckTickComputeBroker {
+     }
+ 
+     private <R extends ComputeResult> ComputeTaskHandle<R> handle(final ComputeTask<?, R> task) {
+-        return new ComputeTaskHandle<>(task.id, task.cancellationToken, task.completion, task::snapshot);
++        return new ComputeTaskHandle<>(task.id, task.cancellationToken, task.completion, task.resultCompletion, task::snapshot);
+     }
+ 
+     private void track(final ComputeTask<?, ?> task) {
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeIoWorkerPool.java b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeIoWorkerPool.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..09b9e9c486f9ca9c3d24f3c69f7e33df7006dbc1
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/FuckTickComputeIoWorkerPool.java
+@@ -0,0 +1,117 @@
++package io.papermc.paper.fucktick.compute;
++
++import io.papermc.paper.fucktick.compute.workload.ChunkSavePayloadResult;
++import io.papermc.paper.fucktick.compute.workload.ChunkSaveWriteResult;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardCopyOption;
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.ThreadFactory;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++
++public final class FuckTickComputeIoWorkerPool {
++
++    private static final AtomicReference<FuckTickComputeIoWorkerPool> INSTANCE = new AtomicReference<>();
++
++    private final ExecutorService workers;
++
++    public static FuckTickComputeIoWorkerPool instance() {
++        final FuckTickComputeIoWorkerPool current = INSTANCE.get();
++        if (current != null) {
++            return current;
++        }
++        final FuckTickComputeIoWorkerPool created = new FuckTickComputeIoWorkerPool();
++        if (INSTANCE.compareAndSet(null, created)) {
++            return created;
++        }
++        created.shutdown();
++        return INSTANCE.get();
++    }
++
++    public static void shutdownIfInitialized() {
++        final FuckTickComputeIoWorkerPool current = INSTANCE.get();
++        if (current != null) {
++            current.shutdown();
++        }
++    }
++
++    private FuckTickComputeIoWorkerPool() {
++        this.workers = Executors.newFixedThreadPool(readWorkerCount(), new IoThreadFactory());
++    }
++
++    public CompletableFuture<ChunkSaveWriteResult> writeChunkPayload(final Path target, final ChunkSavePayloadResult payload) {
++        Objects.requireNonNull(target, "target");
++        Objects.requireNonNull(payload, "payload");
++        if (FuckTickComputeContext.isComputeWorker()) {
++            throw new IllegalStateException("Compute worker must not perform chunk save IO directly.");
++        }
++        return CompletableFuture.supplyAsync(() -> writePayload(target, payload), this.workers);
++    }
++
++    public void shutdown() {
++        this.workers.shutdownNow();
++        try {
++            this.workers.awaitTermination(readShutdownWaitMs(), TimeUnit.MILLISECONDS);
++        } catch (final InterruptedException ex) {
++            Thread.currentThread().interrupt();
++        }
++    }
++
++    private static ChunkSaveWriteResult writePayload(final Path target, final ChunkSavePayloadResult payload) {
++        try {
++            final Path parent = target.toAbsolutePath().getParent();
++            if (parent != null) {
++                Files.createDirectories(parent);
++            }
++            final Path temp = target.resolveSibling(target.getFileName() + ".tmp");
++            final byte[] bytes = payload.compressedPayload();
++            Files.write(temp, bytes);
++            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
++            return new ChunkSaveWriteResult(payload.generation(), payload.worldName(), payload.chunkX(), payload.chunkZ(), target, payload.checksum(), bytes.length, Thread.currentThread().getName());
++        } catch (final IOException ex) {
++            throw new IllegalStateException("Chunk save payload write failed: " + target, ex);
++        }
++    }
++
++    private static int readWorkerCount() {
++        final String value = System.getProperty("fucktick.compute.ioWorkers");
++        if (value == null || value.isBlank()) {
++            return 1;
++        }
++        try {
++            return Math.max(1, Integer.parseInt(value));
++        } catch (final NumberFormatException ex) {
++            return 1;
++        }
++    }
++
++    private static long readShutdownWaitMs() {
++        final String value = System.getProperty("fucktick.compute.ioShutdownWaitMs");
++        if (value == null || value.isBlank()) {
++            return 5_000L;
++        }
++        try {
++            return Math.max(1L, Long.parseLong(value));
++        } catch (final NumberFormatException ex) {
++            return 5_000L;
++        }
++    }
++
++    private static final class IoThreadFactory implements ThreadFactory {
++
++        private final AtomicInteger ids = new AtomicInteger();
++
++        @Override
++        public Thread newThread(final Runnable runnable) {
++            final Thread thread = new Thread(runnable, "FuckTick Compute IO Worker - " + this.ids.incrementAndGet());
++            thread.setDaemon(true);
++            return thread;
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSaveWriteResult.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSaveWriteResult.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bdf7980de9bfa1c6e59d5d9f81b3c12c743bbefc
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/ChunkSaveWriteResult.java
+@@ -0,0 +1,17 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeGeneration;
++import io.papermc.paper.fucktick.compute.ComputeResult;
++import java.nio.file.Path;
++
++public record ChunkSaveWriteResult(
++    ComputeGeneration generation,
++    String worldName,
++    int chunkX,
++    int chunkZ,
++    Path path,
++    String checksum,
++    long bytesWritten,
++    String workerThread
++) implements ComputeResult {
++}
+diff --git a/src/main/java/io/papermc/paper/fucktick/compute/workload/FuckTickComputeWorkloads.java b/src/main/java/io/papermc/paper/fucktick/compute/workload/FuckTickComputeWorkloads.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..de3607bea42a435a3258868c9eff38eb18d3daef
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/fucktick/compute/workload/FuckTickComputeWorkloads.java
+@@ -0,0 +1,289 @@
++package io.papermc.paper.fucktick.compute.workload;
++
++import io.papermc.paper.fucktick.compute.ComputeCancellationToken;
++import io.papermc.paper.fucktick.compute.ComputeTaskCancelledException;
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Objects;
++import java.util.Set;
++import java.util.zip.GZIPOutputStream;
++
++public final class FuckTickComputeWorkloads {
++
++    private static final int MAX_PATH_NODES = 4096;
++
++    private FuckTickComputeWorkloads() {
++    }
++
++    public static PathfindingPlanResult pathfinding(final EntityPathfindingSnapshot snapshot, final ComputeCancellationToken token) {
++        Objects.requireNonNull(snapshot, "snapshot");
++        checkCancelled(token);
++        final BlockNode start = BlockNode.from(snapshot.currentPosition());
++        final BlockNode target = BlockNode.from(snapshot.targetPosition());
++        if (start.equals(target)) {
++            return new PathfindingPlanResult(snapshot.generation(), snapshot.entityId(), snapshot.worldName(), List.of(snapshot.currentPosition()), false);
++        }
++        final Set<BlockNode> blocked = new HashSet<>();
++        final Set<BlockNode> sampled = new HashSet<>();
++        for (final BlockCollisionComputeSnapshot block : snapshot.nearbyCollision()) {
++            final BlockNode node = new BlockNode(block.x(), block.y(), block.z());
++            sampled.add(node);
++            if (block.solid()) {
++                blocked.add(node);
++            }
++        }
++        if (sampled.isEmpty()) {
++            return new PathfindingPlanResult(snapshot.generation(), snapshot.entityId(), snapshot.worldName(), List.of(snapshot.currentPosition(), snapshot.targetPosition()), false);
++        }
++        final Bounds bounds = Bounds.from(sampled, start, target);
++        final ArrayDeque<BlockNode> queue = new ArrayDeque<>();
++        final Map<BlockNode, BlockNode> previous = new HashMap<>();
++        final Set<BlockNode> seen = new HashSet<>();
++        queue.add(start);
++        seen.add(start);
++        BlockNode closest = start;
++        while (!queue.isEmpty() && seen.size() <= MAX_PATH_NODES) {
++            checkCancelled(token);
++            final BlockNode current = queue.removeFirst();
++            if (current.distanceSquared(target) < closest.distanceSquared(target)) {
++                closest = current;
++            }
++            if (current.equals(target)) {
++                return new PathfindingPlanResult(snapshot.generation(), snapshot.entityId(), snapshot.worldName(), toLocations(snapshot.worldName(), snapshot.currentPosition(), snapshot.targetPosition(), previous, target), false);
++            }
++            for (final BlockNode next : current.neighbours()) {
++                if (!bounds.contains(next) || blocked.contains(next) || !seen.add(next)) {
++                    continue;
++                }
++                previous.put(next, current);
++                queue.addLast(next);
++            }
++        }
++        return new PathfindingPlanResult(snapshot.generation(), snapshot.entityId(), snapshot.worldName(), toLocations(snapshot.worldName(), snapshot.currentPosition(), snapshot.targetPosition(), previous, closest), true);
++    }
++
++    public static ExplosionPlanResult explosionPrecompute(final ExplosionSnapshot snapshot, final ComputeCancellationToken token) {
++        Objects.requireNonNull(snapshot, "snapshot");
++        checkCancelled(token);
++        final double radius = Math.max(0.0D, snapshot.power()) * 2.0D;
++        final List<AffectedBlockSnapshot> affected = snapshot.sampledBlocks().stream()
++            .peek(ignored -> checkCancelled(token))
++            .filter(block -> explosionReach(snapshot.center(), block, radius) > 0.0D)
++            .sorted(Comparator.comparingDouble(block -> distanceSquared(snapshot.center(), block.x(), block.y(), block.z())))
++            .map(block -> new AffectedBlockSnapshot(block.x(), block.y(), block.z(), block.blockKey()))
++            .toList();
++        return new ExplosionPlanResult(snapshot.generation(), snapshot.explosionId(), snapshot.worldName(), affected, List.of());
++    }
++
++    public static ChunkSavePayloadResult chunkSaveSerialize(final ChunkSaveSnapshot snapshot, final ComputeCancellationToken token) {
++        Objects.requireNonNull(snapshot, "snapshot");
++        checkCancelled(token);
++        final byte[] compressed = gzip(snapshot.uncompressedPayload(), token);
++        return new ChunkSavePayloadResult(snapshot.generation(), snapshot.worldName(), snapshot.chunkX(), snapshot.chunkZ(), compressed, sha256(compressed));
++    }
++
++    public static ScoreboardRenderResult scoreboardRender(final ScoreboardRenderSnapshot snapshot, final ComputeCancellationToken token) {
++        Objects.requireNonNull(snapshot, "snapshot");
++        final List<Map.Entry<String, String>> placeholders = snapshot.placeholders().entrySet().stream()
++            .sorted(Comparator.comparingInt((Map.Entry<String, String> entry) -> entry.getKey().length()).reversed())
++            .toList();
++        final List<String> rendered = new ArrayList<>(snapshot.templateLines().size());
++        for (final String line : snapshot.templateLines()) {
++            checkCancelled(token);
++            String value = line;
++            for (final Map.Entry<String, String> placeholder : placeholders) {
++                value = value.replace(placeholder.getKey(), placeholder.getValue());
++            }
++            rendered.add(value);
++        }
++        return new ScoreboardRenderResult(snapshot.generation(), snapshot.playerId(), rendered);
++    }
++
++    public static DiagnosticFormattingResult diagnosticFormat(final DiagnosticFormattingSnapshot snapshot, final ComputeCancellationToken token) {
++        Objects.requireNonNull(snapshot, "snapshot");
++        final StringBuilder builder = new StringBuilder();
++        builder.append(snapshot.reportName()).append(':').append('\n');
++        snapshot.counters().entrySet().stream()
++            .sorted(Map.Entry.comparingByKey())
++            .forEach(entry -> {
++                checkCancelled(token);
++                builder.append(entry.getKey()).append('=').append(entry.getValue()).append('\n');
++            });
++        for (final String section : snapshot.sections()) {
++            checkCancelled(token);
++            builder.append(section).append('\n');
++        }
++        return new DiagnosticFormattingResult(snapshot.generation(), snapshot.reportName(), builder.toString().stripTrailing());
++    }
++
++    public static RoutingMetadataWarmupResult routingMetadataWarmup(final RoutingMetadataWarmupSnapshot snapshot, final ComputeCancellationToken token) {
++        Objects.requireNonNull(snapshot, "snapshot");
++        final List<String> warnings = new ArrayList<>();
++        for (final String listener : snapshot.listenerClassNames()) {
++            checkCancelled(token);
++            if (listener == null || listener.isBlank()) {
++                warnings.add("Blank listener class name for plugin " + snapshot.pluginName());
++            } else if (!listener.contains(".")) {
++                warnings.add("Listener class has no package: " + listener);
++            }
++        }
++        final Set<String> commands = new HashSet<>();
++        for (final String command : snapshot.commandNames()) {
++            checkCancelled(token);
++            final String normalized = command == null ? "" : command.toLowerCase(Locale.ROOT);
++            if (normalized.isBlank()) {
++                warnings.add("Blank command name for plugin " + snapshot.pluginName());
++            } else if (!commands.add(normalized)) {
++                warnings.add("Duplicate command metadata: " + command);
++            }
++        }
++        return new RoutingMetadataWarmupResult(snapshot.generation(), snapshot.pluginName(), snapshot.listenerClassNames().size(), snapshot.commandNames().size(), warnings);
++    }
++
++    private static List<LocationComputeSnapshot> toLocations(
++        final String worldName,
++        final LocationComputeSnapshot first,
++        final LocationComputeSnapshot target,
++        final Map<BlockNode, BlockNode> previous,
++        final BlockNode end
++    ) {
++        final ArrayDeque<BlockNode> reversed = new ArrayDeque<>();
++        BlockNode current = end;
++        reversed.addFirst(current);
++        while (previous.containsKey(current)) {
++            current = previous.get(current);
++            reversed.addFirst(current);
++        }
++        final List<LocationComputeSnapshot> path = new ArrayList<>(reversed.size());
++        for (final BlockNode node : reversed) {
++            path.add(new LocationComputeSnapshot(worldName, node.x() + 0.5D, node.y(), node.z() + 0.5D, first.yaw(), first.pitch()));
++        }
++        if (!path.isEmpty()) {
++            path.set(0, first);
++        }
++        if (end.equals(BlockNode.from(target)) && !path.isEmpty()) {
++            path.set(path.size() - 1, target);
++        }
++        return path;
++    }
++
++    private static double explosionReach(final LocationComputeSnapshot center, final BlockCollisionComputeSnapshot block, final double radius) {
++        final double distance = Math.sqrt(distanceSquared(center, block.x(), block.y(), block.z()));
++        if (distance > radius) {
++            return -1.0D;
++        }
++        return radius - distance - Math.max(0.0F, block.explosionResistance()) * 0.1D;
++    }
++
++    private static double distanceSquared(final LocationComputeSnapshot center, final int x, final int y, final int z) {
++        final double dx = center.x() - (x + 0.5D);
++        final double dy = center.y() - (y + 0.5D);
++        final double dz = center.z() - (z + 0.5D);
++        return dx * dx + dy * dy + dz * dz;
++    }
++
++    private static byte[] gzip(final byte[] input, final ComputeCancellationToken token) {
++        try {
++            final ByteArrayOutputStream output = new ByteArrayOutputStream();
++            try (GZIPOutputStream gzip = new GZIPOutputStream(output)) {
++                int offset = 0;
++                while (offset < input.length) {
++                    checkCancelled(token);
++                    final int length = Math.min(8192, input.length - offset);
++                    gzip.write(input, offset, length);
++                    offset += length;
++                }
++            }
++            return output.toByteArray();
++        } catch (final IOException ex) {
++            throw new IllegalStateException("Chunk save payload compression failed", ex);
++        }
++    }
++
++    private static String sha256(final byte[] bytes) {
++        try {
++            final MessageDigest digest = MessageDigest.getInstance("SHA-256");
++            final byte[] hashed = digest.digest(bytes);
++            final StringBuilder builder = new StringBuilder(hashed.length * 2);
++            for (final byte value : hashed) {
++                builder.append(String.format(Locale.ROOT, "%02x", value & 0xff));
++            }
++            return builder.toString();
++        } catch (final NoSuchAlgorithmException ex) {
++            throw new IllegalStateException("SHA-256 is unavailable", ex);
++        }
++    }
++
++    private static void checkCancelled(final ComputeCancellationToken token) {
++        if (token != null && token.isCancelled()) {
++            throw new ComputeTaskCancelledException(token.reason());
++        }
++    }
++
++    private record BlockNode(int x, int y, int z) {
++
++        private static BlockNode from(final LocationComputeSnapshot location) {
++            return new BlockNode(floor(location.x()), floor(location.y()), floor(location.z()));
++        }
++
++        private List<BlockNode> neighbours() {
++            return List.of(
++                new BlockNode(this.x + 1, this.y, this.z),
++                new BlockNode(this.x - 1, this.y, this.z),
++                new BlockNode(this.x, this.y, this.z + 1),
++                new BlockNode(this.x, this.y, this.z - 1),
++                new BlockNode(this.x, this.y + 1, this.z),
++                new BlockNode(this.x, this.y - 1, this.z)
++            );
++        }
++
++        private int distanceSquared(final BlockNode other) {
++            final int dx = this.x - other.x;
++            final int dy = this.y - other.y;
++            final int dz = this.z - other.z;
++            return dx * dx + dy * dy + dz * dz;
++        }
++    }
++
++    private record Bounds(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {
++
++        private static Bounds from(final Set<BlockNode> sampled, final BlockNode start, final BlockNode target) {
++            int minX = Math.min(start.x(), target.x());
++            int maxX = Math.max(start.x(), target.x());
++            int minY = Math.min(start.y(), target.y());
++            int maxY = Math.max(start.y(), target.y());
++            int minZ = Math.min(start.z(), target.z());
++            int maxZ = Math.max(start.z(), target.z());
++            for (final BlockNode node : sampled) {
++                minX = Math.min(minX, node.x());
++                maxX = Math.max(maxX, node.x());
++                minY = Math.min(minY, node.y());
++                maxY = Math.max(maxY, node.y());
++                minZ = Math.min(minZ, node.z());
++                maxZ = Math.max(maxZ, node.z());
++            }
++            return new Bounds(minX - 1, maxX + 1, minY - 1, maxY + 1, minZ - 1, maxZ + 1);
++        }
++
++        private boolean contains(final BlockNode node) {
++            return node.x() >= this.minX && node.x() <= this.maxX
++                && node.y() >= this.minY && node.y() <= this.maxY
++                && node.z() >= this.minZ && node.z() <= this.maxZ;
++        }
++    }
++
++    private static int floor(final double value) {
++        final int integer = (int)value;
++        return value < integer ? integer - 1 : integer;
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java b/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
+index f271e899fc02059a159d07ff024fa1f5b78720b6..1eb7dc86a73c85d5ce6c748238d1f921b8b8cce1 100644
+--- a/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
++++ b/src/test/java/io/papermc/paper/fucktick/compute/FuckTickComputeBrokerTest.java
+@@ -5,22 +5,28 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
+ import static org.junit.jupiter.api.Assertions.assertNotNull;
+ import static org.junit.jupiter.api.Assertions.assertThrows;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+ 
+ import io.papermc.paper.fucktick.compute.workload.AffectedBlockSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.BlockCollisionComputeSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.ChunkSavePayloadResult;
+ import io.papermc.paper.fucktick.compute.workload.ChunkSaveSnapshot;
++import io.papermc.paper.fucktick.compute.workload.ChunkSaveWriteResult;
+ import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingResult;
+ import io.papermc.paper.fucktick.compute.workload.DiagnosticFormattingSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.EntityPathfindingSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.ExplosionPlanResult;
+ import io.papermc.paper.fucktick.compute.workload.ExplosionSnapshot;
++import io.papermc.paper.fucktick.compute.workload.FuckTickComputeWorkloads;
+ import io.papermc.paper.fucktick.compute.workload.LocationComputeSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.PathfindingPlanResult;
+ import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupResult;
+ import io.papermc.paper.fucktick.compute.workload.RoutingMetadataWarmupSnapshot;
+ import io.papermc.paper.fucktick.compute.workload.ScoreboardRenderResult;
+ import io.papermc.paper.fucktick.compute.workload.ScoreboardRenderSnapshot;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Map;
+@@ -33,6 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.atomic.AtomicReference;
+ import org.bukkit.support.environment.Normal;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
+ 
+ @Normal
+ public class FuckTickComputeBrokerTest {
+@@ -398,6 +405,174 @@ public class FuckTickComputeBrokerTest {
+         assertThrows(UnsupportedOperationException.class, () -> scoreboardSnapshot.templateLines().add("bad"));
+     }
+ 
++    @Test
++    void workloadEngineComputesAllCandidateWorkloads() {
++        final ComputeGeneration generation = ComputeGeneration.of(21L);
++        final UUID entityId = UUID.randomUUID();
++        final UUID playerId = UUID.randomUUID();
++        final LocationComputeSnapshot start = new LocationComputeSnapshot("world", 0.5D, 64.0D, 0.5D, 90.0F, 0.0F);
++        final LocationComputeSnapshot target = new LocationComputeSnapshot("world", 2.5D, 64.0D, 0.5D, 90.0F, 0.0F);
++        final List<BlockCollisionComputeSnapshot> collisions = List.of(
++            new BlockCollisionComputeSnapshot(1, 64, 0, "minecraft:stone", true, 6.0F),
++            new BlockCollisionComputeSnapshot(1, 64, 1, "minecraft:air", false, 0.0F),
++            new BlockCollisionComputeSnapshot(2, 64, 1, "minecraft:air", false, 0.0F)
++        );
++
++        final PathfindingPlanResult path = FuckTickComputeWorkloads.pathfinding(
++            new EntityPathfindingSnapshot(generation, entityId, "world", start, target, collisions, 1L),
++            new ComputeCancellationToken()
++        );
++        assertFalse(path.partial());
++        assertEquals(target, path.path().get(path.path().size() - 1));
++        assertTrue(path.path().size() > 2);
++
++        final ExplosionPlanResult explosion = FuckTickComputeWorkloads.explosionPrecompute(
++            new ExplosionSnapshot(generation, UUID.randomUUID(), "world", start, 4.0F, List.of(
++                new BlockCollisionComputeSnapshot(0, 64, 0, "minecraft:stone", true, 0.2F),
++                new BlockCollisionComputeSnapshot(100, 64, 100, "minecraft:stone", true, 0.2F)
++            ), 2L),
++            new ComputeCancellationToken()
++        );
++        assertEquals(1, explosion.affectedBlocks().size());
++        assertEquals("minecraft:stone", explosion.affectedBlocks().get(0).blockKey());
++
++        final ChunkSavePayloadResult chunk = FuckTickComputeWorkloads.chunkSaveSerialize(
++            new ChunkSaveSnapshot(generation, "world", 3, 4, "chunk-payload".getBytes(StandardCharsets.UTF_8), 3L),
++            new ComputeCancellationToken()
++        );
++        assertTrue(chunk.compressedPayload().length > 0);
++        assertEquals(64, chunk.checksum().length());
++
++        final ScoreboardRenderResult scoreboard = FuckTickComputeWorkloads.scoreboardRender(
++            new ScoreboardRenderSnapshot(generation, playerId, "jgdi", "world", List.of("Hello %player%", "%world%"), Map.of("%player%", "jgdi", "%world%", "world"), 4L),
++            new ComputeCancellationToken()
++        );
++        assertEquals(List.of("Hello jgdi", "world"), scoreboard.renderedLines());
++
++        final DiagnosticFormattingResult diagnostic = FuckTickComputeWorkloads.diagnosticFormat(
++            new DiagnosticFormattingSnapshot(generation, "compute", Map.of("queued", "2", "running", "1"), List.of("workers ok")),
++            new ComputeCancellationToken()
++        );
++        assertTrue(diagnostic.formattedText().contains("queued=2"));
++        assertTrue(diagnostic.formattedText().contains("workers ok"));
++
++        final RoutingMetadataWarmupResult routing = FuckTickComputeWorkloads.routingMetadataWarmup(
++            new RoutingMetadataWarmupSnapshot(generation, "Plugin", List.of("ListenerWithoutPackage"), List.of("test", "TEST")),
++            new ComputeCancellationToken()
++        );
++        assertEquals(1, routing.listenersScanned());
++        assertEquals(2, routing.commandsScanned());
++        assertEquals(2, routing.warnings().size());
++    }
++
++    @Test
++    void resultFutureAndBlockingWaitReturnAppliedResult() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            final ComputeGeneration generation = ComputeGeneration.of(31L);
++            final DiagnosticFormattingSnapshot snapshot = new DiagnosticFormattingSnapshot(generation, "compute", Map.of("completed", "1"), List.of("done"));
++            final ComputeTaskHandle<DiagnosticFormattingResult> handle = broker.submit(
++                ComputeTaskType.DIAGNOSTIC_FORMAT,
++                ComputePriority.LOW_DIAGNOSTICS,
++                ComputeTaskOwner.SERVER,
++                "diagnostic-format-workload",
++                snapshot,
++                FuckTickComputeWorkloads::diagnosticFormat,
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++
++            assertEquals(ComputeTaskState.APPLIED, handle.completion().get(5L, TimeUnit.SECONDS));
++            assertTrue(handle.result().get(5L, TimeUnit.SECONDS).formattedText().contains("completed=1"));
++            assertEquals(handle.result().get(5L, TimeUnit.SECONDS), handle.awaitResultOrFallback(1L, TimeUnit.SECONDS, () -> new DiagnosticFormattingResult(generation, "fallback", "fallback")));
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void blockingWaitTimeoutUsesFallbackAndCancelsTask() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            final ComputeGeneration generation = ComputeGeneration.of(32L);
++            final ComputeTaskHandle<TestResult> handle = broker.submit(
++                ComputeTaskType.GENERIC,
++                ComputePriority.NORMAL_WORLD_COMPUTE,
++                ComputeTaskOwner.SERVER,
++                "blocking-wait-timeout",
++                new TestSnapshot(generation, 1),
++                (input, token) -> {
++                    while (!token.isCancelled()) {
++                        Thread.sleep(10L);
++                    }
++                    throw new ComputeTaskCancelledException(token.reason());
++                },
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++
++            final TestResult fallback = new TestResult(generation, -1);
++            assertEquals(fallback, handle.awaitResultOrFallback(25L, TimeUnit.MILLISECONDS, () -> fallback));
++            assertTrue(handle.isCancelled());
++            assertEquals(ComputeTaskState.CANCELLED, handle.completion().get(5L, TimeUnit.SECONDS));
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void blockingWaitRejectsNestedOwnerWaitAndComputeWorkerWait() throws Exception {
++        final FuckTickComputeBroker broker = broker(1, 16, 10_000L);
++        try {
++            final ComputeTaskHandle<TestResult> handle = broker.submit(
++                ComputeTaskType.GENERIC,
++                ComputePriority.NORMAL_WORLD_COMPUTE,
++                ComputeTaskOwner.SERVER,
++                "nested-blocking-wait",
++                new TestSnapshot(ComputeGeneration.of(33L), 1),
++                (input, token) -> {
++                    while (!token.isCancelled()) {
++                        Thread.sleep(10L);
++                    }
++                    throw new ComputeTaskCancelledException(token.reason());
++                },
++                Runnable::run,
++                (context, result) -> ComputeApplyDecision.APPLIED
++            );
++
++            assertThrows(IllegalStateException.class, () -> handle.awaitResultOrFallback(25L, TimeUnit.MILLISECONDS, () -> handle.awaitResultOrFallback(1L, TimeUnit.MILLISECONDS, () -> new TestResult(ComputeGeneration.of(33L), -1))));
++            handle.cancel("test cleanup");
++            assertEquals(ComputeTaskState.CANCELLED, handle.completion().get(5L, TimeUnit.SECONDS));
++
++            try (FuckTickComputeContext.Scope ignored = FuckTickComputeContext.enter(999L, ComputeTaskType.GENERIC, ComputePriority.NORMAL_WORLD_COMPUTE, "compute-worker-wait-test")) {
++                assertThrows(IllegalStateException.class, () -> handle.awaitResultOrFallback(1L, TimeUnit.MILLISECONDS, () -> new TestResult(ComputeGeneration.of(33L), -1)));
++            }
++        } finally {
++            broker.shutdown();
++        }
++    }
++
++    @Test
++    void chunkSaveWriteUsesDedicatedIoWorker(@TempDir final Path tempDir) throws Exception {
++        final ComputeGeneration generation = ComputeGeneration.of(34L);
++        final ChunkSavePayloadResult payload = FuckTickComputeWorkloads.chunkSaveSerialize(
++            new ChunkSaveSnapshot(generation, "world", 8, 9, "chunk-write".getBytes(StandardCharsets.UTF_8), 5L),
++            new ComputeCancellationToken()
++        );
++        final Path target = tempDir.resolve("c.8.9.ftpayload");
++        try {
++            final ChunkSaveWriteResult result = FuckTickComputeIoWorkerPool.instance().writeChunkPayload(target, payload).get(5L, TimeUnit.SECONDS);
++
++            assertEquals(generation, result.generation());
++            assertEquals(payload.checksum(), result.checksum());
++            assertEquals(payload.compressedPayload().length, result.bytesWritten());
++            assertTrue(result.workerThread().startsWith("FuckTick Compute IO Worker - "));
++            assertArrayEquals(payload.compressedPayload(), Files.readAllBytes(target));
++        } finally {
++            FuckTickComputeIoWorkerPool.shutdownIfInitialized();
++        }
++    }
++
+     private static FuckTickComputeBroker broker(final int workers, final int maxQueued, final long maxApplyDelayMs) {
+         return FuckTickComputeBroker.createForTesting(new ComputeBudgetPolicy(
+             workers,
